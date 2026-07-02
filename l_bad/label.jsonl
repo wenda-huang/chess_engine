@@ -1,0 +1,6 @@
+{"t": 1782880439.357063, "event": "generate", "status": "start", "n": 6000}
+{"t": 1782880440.745845, "event": "generate", "status": "progress", "n": 2000, "target": 6000, "rate_pos_per_sec": 1441}
+{"t": 1782880443.5857596, "event": "generate", "status": "progress", "n": 6000, "target": 6000, "rate_pos_per_sec": 1419}
+{"t": 1782880443.5868702, "event": "generate", "status": "progress", "n": 6000, "target": 6000, "rate_pos_per_sec": 1419}
+{"t": 1782880443.5883474, "event": "generate", "status": "done", "n": 6000, "elapsed_s": 4.2}
+{"t": 1782880443.5972643, "event": "error", "stage": "stockfish", "message": "Could not start Stockfish at 'C:\\nope\\stockfish_missing.exe': [WinError 2] The system cannot find the file specified", "hint": "Set STOCKFISH_PATH to your Stockfish binary and restart the server."}

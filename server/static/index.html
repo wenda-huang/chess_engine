@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AlphaZero Chess Engine</title>
+  <link rel="stylesheet"
+        href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <h1>AlphaZero-Style Chess Engine</h1>
+    <div class="engine-info">
+      Active model: <span id="active-checkpoint">loading...</span>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="game">Play</button>
+    <button class="tab-btn" data-tab="editor">Board Editor</button>
+    <button class="tab-btn" data-tab="training">Training</button>
+  </nav>
+
+  <!-- ------------------------------------------------------------------ -->
+  <!-- Game -->
+  <!-- ------------------------------------------------------------------ -->
+  <section id="tab-game" class="tab-panel active">
+    <div class="layout">
+      <div class="board-col">
+        <div id="game-board" class="board"></div>
+        <div id="game-status" class="status">Start a new game.</div>
+      </div>
+      <div class="side-col">
+        <h2>Game controls</h2>
+        <label>Play as
+          <select id="game-color">
+            <option value="white">White</option>
+            <option value="black">Black</option>
+          </select>
+        </label>
+        <label>Difficulty
+          <select id="game-difficulty">
+            <option value="easy">Easy (30 sims)</option>
+            <option value="medium" selected>Medium (80 sims)</option>
+            <option value="hard">Hard (200 sims)</option>
+          </select>
+        </label>
+        <button id="new-game-btn" class="primary">New Game</button>
+        <h3>Moves</h3>
+        <div id="move-list" class="move-list"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ------------------------------------------------------------------ -->
+  <!-- Board editor -->
+  <!-- ------------------------------------------------------------------ -->
+  <section id="tab-editor" class="tab-panel">
+    <div class="layout">
+      <div class="board-col">
+        <div id="editor-board" class="board"></div>
+        <div class="editor-controls">
+          <button id="editor-start">Start position</button>
+          <button id="editor-clear">Clear board</button>
+          <button id="editor-flip">Flip</button>
+        </div>
+        <div class="editor-controls">
+          <label>Side to move
+            <select id="editor-turn">
+              <option value="w">White</option>
+              <option value="b">Black</option>
+            </select>
+          </label>
+          <button id="evaluate-btn" class="primary">Evaluate</button>
+        </div>
+      </div>
+      <div class="side-col">
+        <h2>Analysis</h2>
+        <div id="eval-summary" class="eval-summary">
+          Place pieces and press Evaluate.
+        </div>
+        <h3>Suggested moves</h3>
+        <ol id="suggestions" class="suggestions"></ol>
+      </div>
+    </div>
+  </section>
+
+  <!-- ------------------------------------------------------------------ -->
+  <!-- Training -->
+  <!-- ------------------------------------------------------------------ -->
+  <section id="tab-training" class="tab-panel">
+    <div class="training-grid">
+      <div class="card">
+        <h3>1. Label positions (Stockfish)</h3>
+        <label>Positions to generate
+          <input id="label-generate" type="number" value="500" />
+        </label>
+        <label>Search depth
+          <input id="label-depth" type="number" value="10" />
+        </label>
+        <label>Parallel workers
+          <input id="label-workers" type="number" value="8" />
+        </label>
+        <label>MultiPV (candidate moves)
+          <input id="label-multipv" type="number" value="4" />
+        </label>
+        <button class="primary" data-job="label">Start labeling</button>
+      </div>
+      <div class="card">
+        <h3>2. Supervised bootstrap</h3>
+        <label>Epochs <input id="sup-epochs" type="number" value="8" /></label>
+        <label>Batch size <input id="sup-batch" type="number" value="256" /></label>
+        <button class="primary" data-job="supervised">Start supervised</button>
+      </div>
+      <div class="card">
+        <h3>3. Self-play refinement</h3>
+        <label>Iterations <input id="sp-iters" type="number" value="10" /></label>
+        <label>Games / iter <input id="sp-games" type="number" value="8" /></label>
+        <label>MCTS sims <input id="sp-sims" type="number" value="100" /></label>
+        <button class="primary" data-job="selfplay">Start self-play</button>
+      </div>
+    </div>
+
+    <div class="training-controls">
+      <span id="train-status" class="status">No job running.</span>
+      <button id="stop-train" class="danger">Stop job</button>
+    </div>
+
+    <div class="checkpoints">
+      <h3>Checkpoints</h3>
+      <select id="checkpoint-select"></select>
+      <button id="activate-checkpoint">Activate</button>
+      <button id="refresh-checkpoints">Refresh</button>
+    </div>
+
+    <h3>Live log</h3>
+    <pre id="train-log" class="train-log"></pre>
+  </section>
+
+  <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+  <script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

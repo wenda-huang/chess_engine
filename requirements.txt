@@ -1,0 +1,5 @@
+torch>=2.0
+python-chess>=1.11
+numpy>=1.24
+fastapi>=0.110
+uvicorn[standard]>=0.29
