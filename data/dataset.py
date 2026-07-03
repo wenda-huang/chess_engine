@@ -21,6 +21,35 @@ def _dense_from_sparse(indices: np.ndarray, probs: np.ndarray) -> np.ndarray:
     return vec
 
 
+def _raise_fd_limit() -> None:
+    """Best-effort raise of the open-file limit.
+
+    Each shard is held open as a memory-mapped file, so a large corpus (hundreds
+    of shards) can bump into the default ``ulimit -n`` of 1024. That starves
+    later ``open`` calls -- including CUDA opening its device nodes, which then
+    surfaces as a misleading ``cudaErrorDevicesUnavailable``. Raising the limit
+    up front avoids it. No-op on non-POSIX platforms or if not permitted.
+    """
+    try:
+        import resource
+    except ImportError:
+        return  # Windows
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        want = 1_048_576
+        if hard != resource.RLIM_INFINITY and hard < want:
+            # Try to lift the hard cap too (permitted as root); fall back if not.
+            try:
+                resource.setrlimit(resource.RLIMIT_NOFILE, (want, want))
+                return
+            except (ValueError, OSError):
+                pass
+        new_soft = want if hard == resource.RLIM_INFINITY else min(want, hard)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
+    except Exception:
+        pass
+
+
 class _Shard:
     """One shard: planes memory-mapped from disk; value/policy metadata in RAM."""
 
@@ -52,6 +81,7 @@ class StockfishDataset(Dataset):
     """
 
     def __init__(self, data_dir: str, limit: Optional[int] = None):
+        _raise_fd_limit()
         self.shards: List[_Shard] = []
         # Global sample index -> (shard_id, local_index).
         self.index: List[Tuple[int, int]] = []
