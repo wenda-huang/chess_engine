@@ -130,6 +130,8 @@ def cmd_selfplay(args: argparse.Namespace) -> None:
         workers=args.workers,
         selfplay_device=args.selfplay_device,
         eval_every=args.eval_every,
+        eval_games=args.eval_games,
+        eval_skill=args.eval_skill,
     )
     print(f"Saved self-play checkpoint to {path}")
 
@@ -225,6 +227,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Device for self-play workers (default: cpu when workers>1, else the training device)",
     )
     sp.add_argument("--eval-every", type=int, default=5)
+    sp.add_argument("--eval-games", type=int, default=12, help="Games per in-loop Elo eval")
+    sp.add_argument("--eval-skill", type=int, default=3, help="Stockfish skill for in-loop eval")
     sp.set_defaults(func=cmd_selfplay)
 
     e = sub.add_parser("evaluate", help="Estimate Elo vs Stockfish")
