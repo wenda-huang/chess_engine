@@ -34,6 +34,13 @@ _SP: dict = {}
 
 
 def _sp_init(model_config: dict, config: Config, sp_device: str, sf_value_weight: float) -> None:
+    # Each worker is one of many; pin it to a single CPU thread so N workers don't
+    # each spawn N intra-op threads and thrash the cores (crippling on CPU, and
+    # still worth doing for the Python-side MCTS overhead when running on GPU).
+    try:
+        torch.set_num_threads(1)
+    except Exception:
+        pass
     config.device = sp_device
     _SP["model_config"] = model_config
     _SP["config"] = config
