@@ -126,6 +126,7 @@ def cmd_selfplay(args: argparse.Namespace) -> None:
         batch_size=args.batch_size,
         init_checkpoint=args.init,
         out_name=args.out,
+        buffer_capacity=args.buffer_capacity,
         sf_value_weight=args.sf_value_weight,
         workers=args.workers,
         selfplay_device=args.selfplay_device,
@@ -218,6 +219,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--init", default="models/supervised.pt")
     sp.add_argument("--out", default="selfplay.pt")
     sp.add_argument("--sf-value-weight", type=float, default=0.0)
+    sp.add_argument(
+        "--buffer-capacity", type=int, default=50_000,
+        help="Replay buffer size (raise for long runs, e.g. 300000)",
+    )
     sp.add_argument(
         "--workers", type=int, default=1, help="Parallel self-play worker processes (e.g. 12)"
     )
