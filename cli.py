@@ -124,12 +124,17 @@ def cmd_selfplay(args: argparse.Namespace) -> None:
         sims=args.sims,
         train_steps=args.train_steps,
         batch_size=args.batch_size,
+        lr=args.lr,
         init_checkpoint=args.init,
         out_name=args.out,
         buffer_capacity=args.buffer_capacity,
         sf_value_weight=args.sf_value_weight,
         workers=args.workers,
         selfplay_device=args.selfplay_device,
+        sup_fraction=args.sup_fraction,
+        arena_every=args.arena_every,
+        arena_games=args.arena_games,
+        gate_threshold=args.gate_threshold,
         eval_every=args.eval_every,
         eval_games=args.eval_games,
         eval_skill=args.eval_skill,
@@ -210,30 +215,41 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.set_defaults(func=cmd_supervised)
 
-    sp = sub.add_parser("selfplay", help="Self-play refinement loop")
-    sp.add_argument("--iterations", type=int, default=20)
-    sp.add_argument("--games-per-iter", type=int, default=10)
-    sp.add_argument("--sims", type=int, default=100)
+    sp = sub.add_parser("selfplay", help="Self-play refinement loop (arena-gated)")
+    sp.add_argument("--iterations", type=int, default=40)
+    sp.add_argument("--games-per-iter", type=int, default=48)
+    sp.add_argument("--sims", type=int, default=200)
     sp.add_argument("--train-steps", type=int, default=200)
-    sp.add_argument("--batch-size", type=int, default=128)
+    sp.add_argument("--batch-size", type=int, default=256)
+    sp.add_argument("--lr", type=float, default=1e-4, help="Learning rate (keep low to avoid forgetting)")
     sp.add_argument("--init", default="models/supervised.pt")
     sp.add_argument("--out", default="selfplay.pt")
     sp.add_argument("--sf-value-weight", type=float, default=0.0)
     sp.add_argument(
-        "--buffer-capacity", type=int, default=50_000,
+        "--buffer-capacity", type=int, default=300_000,
         help="Replay buffer size (raise for long runs, e.g. 300000)",
     )
     sp.add_argument(
-        "--workers", type=int, default=1, help="Parallel self-play worker processes (e.g. 12)"
+        "--workers", type=int, default=1, help="Parallel self-play worker processes (e.g. 14)"
     )
     sp.add_argument(
         "--selfplay-device",
         default=None,
         help="Device for self-play workers (default: cpu when workers>1, else the training device)",
     )
-    sp.add_argument("--eval-every", type=int, default=5)
-    sp.add_argument("--eval-games", type=int, default=12, help="Games per in-loop Elo eval")
-    sp.add_argument("--eval-skill", type=int, default=3, help="Stockfish skill for in-loop eval")
+    sp.add_argument(
+        "--sup-fraction", type=float, default=0.5,
+        help="Fraction of each training batch drawn from the labeled corpus (anti-forgetting)",
+    )
+    sp.add_argument("--arena-every", type=int, default=3, help="Run arena gating every N iters")
+    sp.add_argument("--arena-games", type=int, default=16, help="Games in the candidate-vs-champion arena")
+    sp.add_argument(
+        "--gate-threshold", type=float, default=0.55,
+        help="Candidate must score >= this vs champion to be promoted",
+    )
+    sp.add_argument("--eval-every", type=int, default=0, help="Optional absolute Elo check vs Stockfish (0=off)")
+    sp.add_argument("--eval-games", type=int, default=20, help="Games per in-loop Elo eval")
+    sp.add_argument("--eval-skill", type=int, default=5, help="Stockfish skill for in-loop eval")
     sp.set_defaults(func=cmd_selfplay)
 
     e = sub.add_parser("evaluate", help="Estimate Elo vs Stockfish")
