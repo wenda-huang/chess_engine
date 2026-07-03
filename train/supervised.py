@@ -30,12 +30,14 @@ def train_supervised(
     limit: Optional[int] = None,
     resume: Optional[str] = None,
     out_name: str = "supervised.pt",
+    num_workers: int = 0,
     progress: Optional[ProgressLogger] = None,
 ) -> str:
     config = config or Config()
     config.ensure_dirs()
     progress = progress or ProgressLogger(os.path.join(config.logs_dir, "supervised.jsonl"))
     device = config.device
+    pin = device == "cuda"
 
     dataset = StockfishDataset(config.data_dir, limit=limit)
     if len(dataset) == 0:
@@ -48,8 +50,23 @@ def train_supervised(
     train_set, val_set = random_split(
         dataset, [n_train, n_val], generator=torch.Generator().manual_seed(0)
     )
-    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, drop_last=False)
-    val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(
+        train_set,
+        batch_size=batch_size,
+        shuffle=True,
+        drop_last=False,
+        num_workers=num_workers,
+        pin_memory=pin,
+        persistent_workers=num_workers > 0,
+    )
+    val_loader = DataLoader(
+        val_set,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin,
+        persistent_workers=num_workers > 0,
+    )
 
     if resume and os.path.exists(resume):
         model, _ = load_checkpoint(resume, device=device)
@@ -71,6 +88,7 @@ def train_supervised(
             "blocks": model.config.num_blocks,
             "channels": model.config.channels,
             "params_millions": round(n_params / 1e6, 2),
+            "num_workers": num_workers,
         }
     )
 
@@ -82,9 +100,9 @@ def train_supervised(
         model.train()
         running_p, running_v, count = 0.0, 0.0, 0
         for planes, target_policy, target_value in train_loader:
-            planes = planes.to(device)
-            target_policy = target_policy.to(device)
-            target_value = target_value.to(device)
+            planes = planes.to(device, non_blocking=pin)
+            target_policy = target_policy.to(device, non_blocking=pin)
+            target_value = target_value.to(device, non_blocking=pin)
 
             logits, value = model(planes)
             p_loss = policy_loss(logits, target_policy)

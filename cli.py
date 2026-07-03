@@ -108,6 +108,7 @@ def cmd_supervised(args: argparse.Namespace) -> None:
         limit=args.limit,
         resume=args.resume,
         out_name=args.out,
+        num_workers=args.workers,
     )
     print(f"Saved supervised checkpoint to {path}")
 
@@ -126,6 +127,8 @@ def cmd_selfplay(args: argparse.Namespace) -> None:
         init_checkpoint=args.init,
         out_name=args.out,
         sf_value_weight=args.sf_value_weight,
+        workers=args.workers,
+        selfplay_device=args.selfplay_device,
         eval_every=args.eval_every,
     )
     print(f"Saved self-play checkpoint to {path}")
@@ -199,6 +202,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--blocks", type=int, default=None, help="Residual blocks (network depth)")
     s.add_argument("--channels", type=int, default=None, help="Conv channels (network width)")
     s.add_argument("--value-hidden", type=int, default=None, help="Value head hidden units")
+    s.add_argument(
+        "--workers", type=int, default=0, help="DataLoader worker processes (use on GPU, e.g. 8)"
+    )
     s.set_defaults(func=cmd_supervised)
 
     sp = sub.add_parser("selfplay", help="Self-play refinement loop")
@@ -210,6 +216,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--init", default="models/supervised.pt")
     sp.add_argument("--out", default="selfplay.pt")
     sp.add_argument("--sf-value-weight", type=float, default=0.0)
+    sp.add_argument(
+        "--workers", type=int, default=1, help="Parallel self-play worker processes (e.g. 12)"
+    )
+    sp.add_argument(
+        "--selfplay-device",
+        default=None,
+        help="Device for self-play workers (default: cpu when workers>1, else the training device)",
+    )
     sp.add_argument("--eval-every", type=int, default=5)
     sp.set_defaults(func=cmd_selfplay)
 

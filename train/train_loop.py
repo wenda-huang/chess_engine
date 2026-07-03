@@ -1,14 +1,23 @@
-"""The AlphaZero refinement loop: self-play -> train -> evaluate -> promote."""
+"""The AlphaZero refinement loop: self-play -> train -> evaluate -> promote.
+
+Self-play can run across multiple worker processes. Each worker loads the
+current network weights (refreshed every iteration) and generates games on its
+own CPU core, while the main process performs the (GPU) training step. This is
+the same parallelism trick used for labeling and gives a near-linear speedup in
+games/hour on a many-core box.
+"""
 from __future__ import annotations
 
+import multiprocessing as mp
 import os
 from typing import Optional
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
 from data.dataset import ReplayBuffer
-from engine.config import Config
+from engine.config import Config, ModelConfig
 from engine.model import build_model, load_checkpoint, save_checkpoint
 from engine.player import EnginePlayer
 from teacher.stockfish import StockfishTeacher
@@ -16,6 +25,54 @@ from train.evaluate import estimate_elo
 from train.progress import ProgressLogger
 from train.selfplay import play_selfplay_game
 from train.supervised import policy_loss
+
+
+# --------------------------------------------------------------------------- #
+# Parallel self-play workers
+# --------------------------------------------------------------------------- #
+_SP: dict = {}
+
+
+def _sp_init(model_config: dict, config: Config, sp_device: str, sf_value_weight: float) -> None:
+    config.device = sp_device
+    _SP["model_config"] = model_config
+    _SP["config"] = config
+    _SP["device"] = sp_device
+    _SP["version"] = None
+    _SP["player"] = None
+    _SP["sf_value_weight"] = sf_value_weight
+    _SP["teacher"] = (
+        StockfishTeacher(config.stockfish_path, depth=8, multipv=1)
+        if sf_value_weight > 0.0
+        else None
+    )
+
+
+def _sp_play(task):
+    import random as _random
+
+    version, weights_path, sims, temperature_moves, seed = task
+    # Reload weights only when the model version changes (once per iteration).
+    if _SP["version"] != version:
+        model = build_model(ModelConfig(**_SP["model_config"]), device=_SP["device"])
+        ckpt = torch.load(weights_path, map_location=_SP["device"])
+        model.load_state_dict(ckpt["state_dict"])
+        model.eval()
+        _SP["player"] = EnginePlayer(model, _SP["config"])
+        _SP["version"] = version
+
+    np.random.seed(seed % (2 ** 32))
+    rng = _random.Random(seed)
+    samples = play_selfplay_game(
+        _SP["player"],
+        sims=sims,
+        temperature_moves=temperature_moves,
+        teacher=_SP["teacher"],
+        sf_value_weight=_SP["sf_value_weight"],
+        rng=rng,
+    )
+    # Compress planes to uint8 (they are all 0/1) for cheaper inter-process transfer.
+    return [(p.astype(np.uint8), pi, float(z)) for (p, pi, z) in samples]
 
 
 def train_selfplay(
@@ -30,6 +87,9 @@ def train_selfplay(
     init_checkpoint: Optional[str] = "models/supervised.pt",
     out_name: str = "selfplay.pt",
     sf_value_weight: float = 0.0,
+    temperature_moves: int = 20,
+    workers: int = 1,
+    selfplay_device: Optional[str] = None,
     eval_every: int = 5,
     eval_games: int = 12,
     eval_skill: int = 3,
@@ -48,13 +108,28 @@ def train_selfplay(
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
     buffer = ReplayBuffer(capacity=buffer_capacity)
-    player = EnginePlayer(model, config)
+    player = EnginePlayer(model, config)  # used for the sequential path and evaluation
+
+    # Self-play workers default to CPU: it uses the spare cores, avoids GPU
+    # oversubscription, and sidesteps CUDA-in-subprocess pitfalls.
+    parallel = workers and workers > 1
+    sp_device = selfplay_device or ("cpu" if parallel else device)
 
     teacher = None
-    if sf_value_weight > 0.0:
+    if sf_value_weight > 0.0 and not parallel:
         teacher = StockfishTeacher(config.stockfish_path, depth=8, multipv=1)
 
+    pool = None
+    if parallel:
+        ctx = mp.get_context("spawn")
+        pool = ctx.Pool(
+            processes=workers,
+            initializer=_sp_init,
+            initargs=(vars(model.config), config, sp_device, sf_value_weight),
+        )
+
     out_path = os.path.join(config.models_dir, out_name)
+    weights_path = os.path.join(config.models_dir, "_sp_weights.pt")
     best_elo = -1e9
 
     progress.log(
@@ -65,34 +140,58 @@ def train_selfplay(
             "games_per_iter": games_per_iter,
             "sims": sims,
             "device": device,
+            "workers": workers,
+            "selfplay_device": sp_device,
         }
     )
 
     try:
         for it in range(iterations):
             model.eval()
-            new_samples = 0
-            for g in range(games_per_iter):
-                samples = play_selfplay_game(
-                    player,
-                    sims=sims,
-                    teacher=teacher,
-                    sf_value_weight=sf_value_weight,
-                )
-                buffer.add_game(samples)
-                new_samples += len(samples)
-                progress.log(
-                    {
-                        "event": "selfplay_game",
-                        "iter": it,
-                        "game": g + 1,
-                        "games_per_iter": games_per_iter,
-                        "samples": len(samples),
-                        "buffer": len(buffer),
-                    }
-                )
 
-            # Train on the replay buffer.
+            if parallel:
+                # Publish current weights, then fan out games to the workers.
+                save_checkpoint(weights_path, model)
+                tasks = [
+                    (it, weights_path, sims, temperature_moves, it * 100_003 + g)
+                    for g in range(games_per_iter)
+                ]
+                done = 0
+                for samples in pool.imap_unordered(_sp_play, tasks):
+                    buffer.add_game(samples)
+                    done += 1
+                    progress.log(
+                        {
+                            "event": "selfplay_game",
+                            "iter": it,
+                            "game": done,
+                            "games_per_iter": games_per_iter,
+                            "samples": len(samples),
+                            "buffer": len(buffer),
+                        }
+                    )
+            else:
+                for g in range(games_per_iter):
+                    samples = play_selfplay_game(
+                        player,
+                        sims=sims,
+                        temperature_moves=temperature_moves,
+                        teacher=teacher,
+                        sf_value_weight=sf_value_weight,
+                    )
+                    buffer.add_game(samples)
+                    progress.log(
+                        {
+                            "event": "selfplay_game",
+                            "iter": it,
+                            "game": g + 1,
+                            "games_per_iter": games_per_iter,
+                            "samples": len(samples),
+                            "buffer": len(buffer),
+                        }
+                    )
+
+            # Train on the replay buffer (on the main/GPU device).
             model.train()
             if len(buffer) >= batch_size:
                 for step in range(train_steps):
@@ -145,6 +244,9 @@ def train_selfplay(
     finally:
         if teacher is not None:
             teacher.close()
+        if pool is not None:
+            pool.close()
+            pool.join()
 
     progress.log({"event": "done", "mode": "selfplay", "checkpoint": out_path, "best_elo": best_elo})
     return out_path
