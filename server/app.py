@@ -68,7 +68,7 @@ class EngineHolder:
                 model = build_model(self.cfg.model, device=self.cfg.device)
                 self.checkpoint_name = "(untrained)"
             model.eval()
-            self._player = EnginePlayer(model, self.cfg)
+            self._player = EnginePlayer(model, self.cfg, use_books=True)
 
     @property
     def player(self) -> EnginePlayer:
@@ -157,7 +157,7 @@ def _engine_move(board: chess.Board, difficulty: str) -> Optional[str]:
     if board.is_game_over(claim_draw=True):
         return None
     sims = DIFFICULTY_SIMS.get(difficulty, 80)
-    move, _ = engine_holder.player.select_move(board, simulations=sims, temperature=0.0)
+    move, _ = engine_holder.player.play_move(board, simulations=sims)
     board.push(move)
     return move.uci()
 

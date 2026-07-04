@@ -54,6 +54,13 @@ class Config:
         default_factory=lambda: os.environ.get("STOCKFISH_PATH", "stockfish")
     )
 
+    # Optional Polyglot opening book (.bin) and Syzygy endgame tablebase directory.
+    # Used only for actual play/analysis, not training. Empty = disabled.
+    opening_book_path: str = field(
+        default_factory=lambda: os.environ.get("OPENING_BOOK", "")
+    )
+    syzygy_path: str = field(default_factory=lambda: os.environ.get("SYZYGY_PATH", ""))
+
     model: ModelConfig = field(default_factory=ModelConfig)
 
     # Directories (created on demand).

@@ -134,6 +134,7 @@ def cmd_selfplay(args: argparse.Namespace) -> None:
         sup_fraction=args.sup_fraction,
         arena_every=args.arena_every,
         arena_games=args.arena_games,
+        arena_opening_plies=args.arena_opening_plies,
         gate_threshold=args.gate_threshold,
         eval_every=args.eval_every,
         eval_games=args.eval_games,
@@ -243,6 +244,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.add_argument("--arena-every", type=int, default=3, help="Run arena gating every N iters")
     sp.add_argument("--arena-games", type=int, default=16, help="Games in the candidate-vs-champion arena")
+    sp.add_argument(
+        "--arena-opening-plies", type=int, default=8,
+        help="Random opening plies in arena games (higher = fewer draws, clearer signal)",
+    )
     sp.add_argument(
         "--gate-threshold", type=float, default=0.55,
         help="Candidate must score >= this vs champion to be promoted",

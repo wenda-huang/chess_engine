@@ -113,8 +113,13 @@ def _sup_batch(dataset: StockfishDataset, n: int, device: str):
 
 
 def _arena(cand_player: EnginePlayer, champ_player: EnginePlayer, games: int,
-           sims: int, rng: random.Random) -> Tuple[float, int, int, int]:
-    """Play ``games`` candidate-vs-champion. Returns (candidate_score, W, D, L)."""
+           sims: int, rng: random.Random, opening_plies: int = 8) -> Tuple[float, int, int, int]:
+    """Play ``games`` candidate-vs-champion. Returns (candidate_score, W, D, L).
+
+    A longer random opening (``opening_plies``) is used so two near-identical nets
+    don't just replay the same drawn game -- without decisive games the arena
+    can't measure real improvement.
+    """
     def champ_move(board):
         move, _ = champ_player.select_move(board, simulations=sims, temperature=0.0)
         return move
@@ -123,7 +128,8 @@ def _arena(cand_player: EnginePlayer, champ_player: EnginePlayer, games: int,
     wins = draws = losses = 0
     for g in range(games):
         cand_white = g % 2 == 0
-        r = play_game(cand_player, champ_move, cand_white, sims, rng=rng)
+        r = play_game(cand_player, champ_move, cand_white, sims,
+                      random_opening_plies=opening_plies, rng=rng)
         total += r
         if r == 1.0:
             wins += 1
@@ -153,6 +159,7 @@ def train_selfplay(
     arena_every: int = 3,
     arena_games: int = 16,
     arena_sims: Optional[int] = None,
+    arena_opening_plies: int = 8,
     gate_threshold: float = 0.55,
     eval_every: int = 0,
     eval_games: int = 20,
@@ -324,7 +331,8 @@ def train_selfplay(
             if arena_every and (it + 1) % arena_every == 0 and len(buffer) >= batch_size:
                 candidate.eval()
                 champion.eval()
-                score, w, d, l = _arena(cand_player, champ_player, arena_games, arena_sims, rng)
+                score, w, d, l = _arena(cand_player, champ_player, arena_games, arena_sims,
+                                        rng, opening_plies=arena_opening_plies)
                 if score >= gate_threshold:
                     champion.load_state_dict(candidate.state_dict())
                     champ_version += 1
