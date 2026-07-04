@@ -146,6 +146,56 @@ def cmd_selfplay(args: argparse.Namespace) -> None:
     print(f"Saved self-play checkpoint to {path}")
 
 
+def cmd_probe(args: argparse.Namespace) -> None:
+    """Check whether the value head has collapsed to 'always ~0'.
+
+    Samples labeled positions, runs the net, and compares its value predictions
+    against the Stockfish value targets. A healthy net has a wide prediction
+    spread that correlates with the targets; a collapsed one predicts ~0
+    everywhere (near-zero std, near-zero correlation).
+    """
+    import numpy as np
+    import torch
+
+    from data.dataset import StockfishDataset
+    from engine.model import load_checkpoint
+
+    config = Config()
+    model, _ = load_checkpoint(args.checkpoint, device=config.device)
+    model.eval()
+
+    ds = StockfishDataset(config.data_dir)
+    if len(ds) == 0:
+        raise SystemExit("No labeled data found to probe against.")
+    n = min(args.n, len(ds))
+    idxs = np.random.RandomState(0).randint(0, len(ds), size=n)
+
+    planes, targets = [], []
+    for i in idxs:
+        p, _pol, v = ds[int(i)]
+        planes.append(p)
+        targets.append(float(v))
+    x = torch.stack(planes).to(config.device)
+    with torch.no_grad():
+        _, value = model(x)
+    preds = value.detach().cpu().numpy().reshape(-1)
+    targs = np.asarray(targets, dtype=np.float64)
+
+    pred_std = float(preds.std())
+    frac_near_zero = float(np.mean(np.abs(preds) < 0.1))
+    corr = float(np.corrcoef(preds, targs)[0, 1]) if pred_std > 1e-6 else 0.0
+    collapsed = pred_std < 0.1 or abs(corr) < 0.2
+
+    print(f"checkpoint: {args.checkpoint}  (n={n})")
+    print(f"  prediction:  mean={preds.mean():+.3f} std={pred_std:.3f} "
+          f"min={preds.min():+.3f} max={preds.max():+.3f}")
+    print(f"  target:      mean={targs.mean():+.3f} std={targs.std():.3f} "
+          f"min={targs.min():+.3f} max={targs.max():+.3f}")
+    print(f"  |pred|<0.1:  {frac_near_zero*100:.1f}% of positions")
+    print(f"  corr(pred,target): {corr:+.3f}")
+    print(f"  VERDICT: {'VALUE HEAD LIKELY COLLAPSED' if collapsed else 'value head looks healthy'}")
+
+
 def cmd_evaluate(args: argparse.Namespace) -> None:
     from engine.model import build_model, load_checkpoint
     from engine.player import EnginePlayer
@@ -262,6 +312,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--eval-games", type=int, default=20, help="Games per in-loop Elo eval")
     sp.add_argument("--eval-skill", type=int, default=5, help="Stockfish skill for in-loop eval")
     sp.set_defaults(func=cmd_selfplay)
+
+    pr = sub.add_parser("probe", help="Check the value head for collapse (pred vs target)")
+    pr.add_argument("--checkpoint", default="models/selfplay.pt")
+    pr.add_argument("--n", type=int, default=1024, help="Number of positions to sample")
+    pr.set_defaults(func=cmd_probe)
 
     e = sub.add_parser("evaluate", help="Estimate Elo vs Stockfish")
     e.add_argument("--checkpoint", default="models/best.pt")
