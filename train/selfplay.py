@@ -23,12 +23,13 @@ def play_selfplay_game(
     teacher: Optional[StockfishTeacher] = None,
     sf_value_weight: float = 0.0,
     rng: Optional[random.Random] = None,
-) -> List[Sample]:
-    """Play one self-play game and return training samples.
+) -> Tuple[List[Sample], float]:
+    """Play one self-play game; return (samples, white_result).
 
     Each sample is (planes, visit-count policy, value_target). The value target
     is the game outcome from that position's side-to-move perspective, optionally
     blended with the Stockfish eval at that position (``sf_value_weight``).
+    ``white_result`` is 1.0 (white win), 0.0 (draw) or -1.0 (black win).
     """
     rng = rng or random.Random()
     board = chess.Board()
@@ -56,8 +57,10 @@ def play_selfplay_game(
     outcome = board.outcome(claim_draw=True)
     if outcome is None or outcome.winner is None:
         winner = None
+        white_result = 0.0
     else:
         winner = outcome.winner
+        white_result = 1.0 if winner == chess.WHITE else -1.0
 
     samples: List[Sample] = []
     for planes, pi, color, sf_value in history:
@@ -68,4 +71,4 @@ def play_selfplay_game(
         if sf_value is not None:
             z = (1 - sf_value_weight) * z + sf_value_weight * sf_value
         samples.append((planes, pi, float(z)))
-    return samples
+    return samples, white_result

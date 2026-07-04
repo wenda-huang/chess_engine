@@ -27,6 +27,7 @@ import os
 import random
 from typing import List, Optional, Tuple
 
+import chess
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -82,7 +83,7 @@ def _sp_play(task):
 
     np.random.seed(seed % (2 ** 32))
     rng = random.Random(seed)
-    samples = play_selfplay_game(
+    samples, white_result = play_selfplay_game(
         _SP["player"],
         sims=sims,
         temperature_moves=temperature_moves,
@@ -90,7 +91,8 @@ def _sp_play(task):
         sf_value_weight=_SP["sf_value_weight"],
         rng=rng,
     )
-    return [(p.astype(np.uint8), pi, float(z)) for (p, pi, z) in samples]
+    packed = [(p.astype(np.uint8), pi, float(z)) for (p, pi, z) in samples]
+    return packed, float(white_result)
 
 
 # --------------------------------------------------------------------------- #
@@ -112,32 +114,100 @@ def _sup_batch(dataset: StockfishDataset, n: int, device: str):
     )
 
 
-def _arena(cand_player: EnginePlayer, champ_player: EnginePlayer, games: int,
-           sims: int, rng: random.Random, opening_plies: int = 8) -> Tuple[float, int, int, int]:
-    """Play ``games`` candidate-vs-champion. Returns (candidate_score, W, D, L).
+def _arena_game(
+    white_player: EnginePlayer,
+    black_player: EnginePlayer,
+    opening: List[chess.Move],
+    sims: int,
+    temperature: float,
+    temp_moves: int,
+    max_moves: int = 240,
+) -> float:
+    """Play one arena game from a fixed opening. Returns white-perspective result
+    (1.0 white win, 0.0 draw, -1.0 black win)."""
+    board = chess.Board()
+    for mv in opening:
+        if mv in board.legal_moves:
+            board.push(mv)
 
-    A longer random opening (``opening_plies``) is used so two near-identical nets
-    don't just replay the same drawn game -- without decisive games the arena
-    can't measure real improvement.
+    n = 0
+    while not board.is_game_over(claim_draw=True) and board.fullmove_number < max_moves:
+        player = white_player if board.turn == chess.WHITE else black_player
+        temp = temperature if n < temp_moves else 0.0
+        move, _ = player.select_move(
+            board, simulations=sims, temperature=temp, add_noise=temp > 0.0
+        )
+        board.push(move)
+        n += 1
+
+    outcome = board.outcome(claim_draw=True)
+    if outcome is None or outcome.winner is None:
+        return 0.0
+    return 1.0 if outcome.winner == chess.WHITE else -1.0
+
+
+def _arena(
+    cand_player: EnginePlayer,
+    champ_player: EnginePlayer,
+    games: int,
+    sims: int,
+    rng: random.Random,
+    opening_min: int = 2,
+    opening_max: int = 4,
+    temperature: float = 0.0,
+    temp_moves: int = 4,
+    progress: Optional[ProgressLogger] = None,
+    iter_idx: int = 0,
+) -> Tuple[float, int, int, int]:
+    """Candidate-vs-champion match in *mirrored pairs*.
+
+    Each pair shares a random 2-4 ply opening and is played twice with colors
+    swapped, so opening/color imbalance cancels out and the score reflects real
+    strength difference rather than luck. Returns (candidate_score, W, D, L).
     """
-    def champ_move(board):
-        move, _ = champ_player.select_move(board, simulations=sims, temperature=0.0)
-        return move
-
+    pairs = max(1, games // 2)
     total = 0.0
     wins = draws = losses = 0
-    for g in range(games):
-        cand_white = g % 2 == 0
-        r = play_game(cand_player, champ_move, cand_white, sims,
-                      random_opening_plies=opening_plies, rng=rng)
-        total += r
-        if r == 1.0:
+
+    def tally(cand_score: float) -> None:
+        nonlocal total, wins, draws, losses
+        total += cand_score
+        if cand_score == 1.0:
             wins += 1
-        elif r == 0.5:
+        elif cand_score == 0.5:
             draws += 1
         else:
             losses += 1
-    return total / games, wins, draws, losses
+
+    for _ in range(pairs):
+        # Build a shared random opening.
+        board = chess.Board()
+        opening: List[chess.Move] = []
+        k = rng.randint(opening_min, opening_max)
+        for _ in range(k):
+            if board.is_game_over():
+                break
+            mv = rng.choice(list(board.legal_moves))
+            opening.append(mv)
+            board.push(mv)
+
+        # Game A: candidate as White.
+        wr = _arena_game(cand_player, champ_player, opening, sims, temperature, temp_moves)
+        cand_a = (wr + 1.0) / 2.0
+        # Game B (mirror): candidate as Black.
+        wr2 = _arena_game(champ_player, cand_player, opening, sims, temperature, temp_moves)
+        cand_b = (1.0 - wr2) / 2.0
+
+        tally(cand_a)
+        tally(cand_b)
+        if progress:
+            progress.log({
+                "event": "arena_game", "iter": iter_idx,
+                "white_result_a": wr, "white_result_b": wr2,
+                "cand_pair_score": round(cand_a + cand_b, 1),
+            })
+
+    return total / (pairs * 2), wins, draws, losses
 
 
 def train_selfplay(
@@ -159,7 +229,10 @@ def train_selfplay(
     arena_every: int = 3,
     arena_games: int = 16,
     arena_sims: Optional[int] = None,
-    arena_opening_plies: int = 8,
+    arena_opening_min: int = 2,
+    arena_opening_max: int = 4,
+    arena_temperature: float = 0.0,
+    arena_temp_moves: int = 4,
     gate_threshold: float = 0.55,
     eval_every: int = 0,
     eval_games: int = 20,
@@ -254,7 +327,7 @@ def train_selfplay(
                     for g in range(games_per_iter)
                 ]
                 done = 0
-                for samples in pool.imap_unordered(_sp_play, tasks):
+                for samples, white_result in pool.imap_unordered(_sp_play, tasks):
                     buffer.add_game(samples)
                     done += 1
                     progress.log(
@@ -264,12 +337,13 @@ def train_selfplay(
                             "game": done,
                             "games_per_iter": games_per_iter,
                             "samples": len(samples),
+                            "result": white_result,
                             "buffer": len(buffer),
                         }
                     )
             else:
                 for g in range(games_per_iter):
-                    samples = play_selfplay_game(
+                    samples, white_result = play_selfplay_game(
                         champ_player,
                         sims=sims,
                         temperature_moves=temperature_moves,
@@ -284,6 +358,7 @@ def train_selfplay(
                             "game": g + 1,
                             "games_per_iter": games_per_iter,
                             "samples": len(samples),
+                            "result": white_result,
                             "buffer": len(buffer),
                         }
                     )
@@ -331,8 +406,12 @@ def train_selfplay(
             if arena_every and (it + 1) % arena_every == 0 and len(buffer) >= batch_size:
                 candidate.eval()
                 champion.eval()
-                score, w, d, l = _arena(cand_player, champ_player, arena_games, arena_sims,
-                                        rng, opening_plies=arena_opening_plies)
+                score, w, d, l = _arena(
+                    cand_player, champ_player, arena_games, arena_sims, rng,
+                    opening_min=arena_opening_min, opening_max=arena_opening_max,
+                    temperature=arena_temperature, temp_moves=arena_temp_moves,
+                    progress=progress, iter_idx=it,
+                )
                 if score >= gate_threshold:
                     champion.load_state_dict(candidate.state_dict())
                     champ_version += 1
