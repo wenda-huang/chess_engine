@@ -156,6 +156,7 @@ def cmd_probe(args: argparse.Namespace) -> None:
     """
     import numpy as np
     import torch
+    import torch.nn.functional as F
 
     from data.dataset import StockfishDataset
     from engine.model import load_checkpoint
@@ -170,30 +171,49 @@ def cmd_probe(args: argparse.Namespace) -> None:
     n = min(args.n, len(ds))
     idxs = np.random.RandomState(0).randint(0, len(ds), size=n)
 
-    planes, targets = [], []
+    planes, policies, targets = [], [], []
     for i in idxs:
-        p, _pol, v = ds[int(i)]
+        p, pol, v = ds[int(i)]
         planes.append(p)
+        policies.append(pol)
         targets.append(float(v))
     x = torch.stack(planes).to(config.device)
+    tgt_pol = torch.stack(policies).to(config.device)
     with torch.no_grad():
-        _, value = model(x)
+        logits, value = model(x)
+
+    # ---- Value head ----
     preds = value.detach().cpu().numpy().reshape(-1)
     targs = np.asarray(targets, dtype=np.float64)
-
     pred_std = float(preds.std())
     frac_near_zero = float(np.mean(np.abs(preds) < 0.1))
-    corr = float(np.corrcoef(preds, targs)[0, 1]) if pred_std > 1e-6 else 0.0
-    collapsed = pred_std < 0.1 or abs(corr) < 0.2
+    v_corr = float(np.corrcoef(preds, targs)[0, 1]) if pred_std > 1e-6 else 0.0
+    v_collapsed = pred_std < 0.1 or abs(v_corr) < 0.2
+
+    # ---- Policy head (drift vs Stockfish targets) ----
+    logp = F.log_softmax(logits, dim=1)
+    probs = logp.exp()
+    policy_ce = float(-(tgt_pol * logp).sum(dim=1).mean().item())
+    mask = tgt_pol.sum(dim=1) > 0
+    top1_agree = float(
+        (logits.argmax(dim=1)[mask] == tgt_pol.argmax(dim=1)[mask]).float().mean().item()
+    )
+    top1_conf = float(probs.max(dim=1).values.mean().item())  # decisiveness of the net
+    # Effective number of moves the net spreads over (perplexity); higher = more diffuse.
+    ent = float((-(probs * logp).sum(dim=1)).mean().item())
+    perplexity = float(np.exp(ent))
 
     print(f"checkpoint: {args.checkpoint}  (n={n})")
-    print(f"  prediction:  mean={preds.mean():+.3f} std={pred_std:.3f} "
+    print("  [value]")
+    print(f"    pred: mean={preds.mean():+.3f} std={pred_std:.3f} "
           f"min={preds.min():+.3f} max={preds.max():+.3f}")
-    print(f"  target:      mean={targs.mean():+.3f} std={targs.std():.3f} "
-          f"min={targs.min():+.3f} max={targs.max():+.3f}")
-    print(f"  |pred|<0.1:  {frac_near_zero*100:.1f}% of positions")
-    print(f"  corr(pred,target): {corr:+.3f}")
-    print(f"  VERDICT: {'VALUE HEAD LIKELY COLLAPSED' if collapsed else 'value head looks healthy'}")
+    print(f"    target: mean={targs.mean():+.3f} std={targs.std():.3f}")
+    print(f"    |pred|<0.1: {frac_near_zero*100:.1f}%   corr(pred,target): {v_corr:+.3f}")
+    print(f"    -> {'VALUE HEAD LIKELY COLLAPSED' if v_collapsed else 'value head looks healthy'}")
+    print("  [policy]  (vs Stockfish targets)")
+    print(f"    top-1 agreement: {top1_agree*100:.1f}%")
+    print(f"    cross-entropy:   {policy_ce:.3f}  (lower = closer to Stockfish)")
+    print(f"    top-1 confidence: {top1_conf:.3f}   perplexity: {perplexity:.1f} moves")
 
 
 def cmd_evaluate(args: argparse.Namespace) -> None:
