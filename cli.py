@@ -217,6 +217,7 @@ def cmd_probe(args: argparse.Namespace) -> None:
 
 
 def cmd_evaluate(args: argparse.Namespace) -> None:
+    from engine.inference import resolve_infer_backend
     from engine.player import EnginePlayer
     from train.evaluate import estimate_elo
 
@@ -224,21 +225,33 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
     checkpoint = args.checkpoint if args.checkpoint and os.path.exists(args.checkpoint) else None
     if not checkpoint:
         print("No checkpoint found; evaluating a randomly-initialized net.")
-    infer = os.environ.get("CHESSAI_INFER", config.infer_backend)
+    infer = resolve_infer_backend(config, checkpoint)
     print(f"Inference: {infer}", flush=True)
-    player = EnginePlayer(config=config, checkpoint=checkpoint, use_books=args.use_books)
-    if args.use_books:
-        print(
-            f"Books: opening={'on' if player.opening_book else 'off'} "
-            f"tablebase={'on' if player.tablebase else 'off'}",
-            flush=True,
-        )
+    if args.workers <= 1:
+        player = EnginePlayer(config=config, checkpoint=checkpoint, use_books=args.use_books)
+        if args.use_books:
+            print(
+                f"Books: opening={'on' if player.opening_book else 'off'} "
+                f"tablebase={'on' if player.tablebase else 'off'}",
+                flush=True,
+            )
+    else:
+        player = None
+        print(f"Workers: {args.workers} (parallel games)", flush=True)
+        if args.use_books:
+            print(
+                f"Books: opening={'on' if config.opening_book_path else 'off'} "
+                f"tablebase={'on' if config.syzygy_path else 'off'}",
+                flush=True,
+            )
 
     def _progress(ev: dict) -> None:
         if ev.get("event") == "eval_game":
+            elapsed = ev.get("elapsed_s")
+            timing = f" {elapsed}s" if elapsed is not None else ""
             print(
                 f"game {ev['game']}/{ev['games']} result={ev['result']} "
-                f"running_score={ev['score']}",
+                f"running_score={ev['score']}{timing}",
                 flush=True,
             )
 
@@ -250,6 +263,9 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
         skill_level=args.skill,
         movetime=args.movetime,
         progress=_progress,
+        workers=args.workers,
+        checkpoint=checkpoint,
+        use_books=args.use_books,
     )
     print(result, flush=True)
 
@@ -380,6 +396,12 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--movetime", type=float, default=0.05)
     e.add_argument("--use-books", action="store_true",
                    help="Use opening book + tablebases (tests the full deployed engine)")
+    e.add_argument(
+        "--workers",
+        type=int,
+        default=max(1, min(4, (os.cpu_count() or 4) // 2)),
+        help="Parallel game workers (each loads its own net + Stockfish; default: ~half CPU cores, max 4)",
+    )
     e.set_defaults(func=cmd_evaluate)
 
     sv = sub.add_parser("serve", help="Run the web app")

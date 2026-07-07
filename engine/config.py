@@ -73,7 +73,7 @@ class Config:
     mcts_batch_size: int = 32
     mcts_virtual_loss: int = 3
     nn_cache_size: int = 50_000
-    infer_backend: str = "torch"  # torch | onnx | onnx-int8 | tensorrt
+    infer_backend: str = "onnx-int8"  # auto-falls back to torch if no .onnx export
     c_puct: float = 1.5
     dirichlet_alpha: float = 0.3
     dirichlet_epsilon: float = 0.25
