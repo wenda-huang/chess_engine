@@ -52,7 +52,7 @@ class EngineHolder:
         env = os.environ.get("CHESSAI_CHECKPOINT")
         if env and os.path.exists(env):
             return env
-        for name in ("best.pt", "selfplay.pt", "supervised.pt"):
+        for name in ("supervised_big.pt", "best.pt", "selfplay.pt", "supervised.pt"):
             path = os.path.join(self.cfg.models_dir, name)
             if os.path.exists(path):
                 return path

@@ -63,10 +63,15 @@ def play_game(
         moves = list(board.legal_moves)
         board.push(rng.choice(moves))
 
+    use_books = getattr(player, "opening_book", None) is not None or \
+        getattr(player, "tablebase", None) is not None
     while not board.is_game_over(claim_draw=True) and board.fullmove_number < max_moves:
         player_to_move = board.turn == (chess.WHITE if player_is_white else chess.BLACK)
         if player_to_move:
-            move, _ = player.select_move(board, simulations=sims, temperature=0.0)
+            if use_books:
+                move, _ = player.play_move(board, simulations=sims)
+            else:
+                move, _ = player.select_move(board, simulations=sims, temperature=0.0)
         else:
             move = opponent_move(board)
             if move is None:

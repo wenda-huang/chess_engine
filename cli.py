@@ -228,7 +228,22 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
         print("No checkpoint found; evaluating a randomly-initialized net.")
         model = build_model(config.model, device=config.device)
     model.eval()
-    player = EnginePlayer(model, config)
+    player = EnginePlayer(model, config, use_books=args.use_books)
+    if args.use_books:
+        print(
+            f"Books: opening={'on' if player.opening_book else 'off'} "
+            f"tablebase={'on' if player.tablebase else 'off'}",
+            flush=True,
+        )
+
+    def _progress(ev: dict) -> None:
+        if ev.get("event") == "eval_game":
+            print(
+                f"game {ev['game']}/{ev['games']} result={ev['result']} "
+                f"running_score={ev['score']}",
+                flush=True,
+            )
+
     result = estimate_elo(
         player,
         config,
@@ -236,8 +251,9 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
         sims=args.sims,
         skill_level=args.skill,
         movetime=args.movetime,
+        progress=_progress,
     )
-    print(result)
+    print(result, flush=True)
 
 
 def cmd_serve(args: argparse.Namespace) -> None:
@@ -344,6 +360,8 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--sims", type=int, default=80)
     e.add_argument("--skill", type=int, default=3)
     e.add_argument("--movetime", type=float, default=0.05)
+    e.add_argument("--use-books", action="store_true",
+                   help="Use opening book + tablebases (tests the full deployed engine)")
     e.set_defaults(func=cmd_evaluate)
 
     sv = sub.add_parser("serve", help="Run the web app")

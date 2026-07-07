@@ -11,3 +11,6 @@ data_store/
 logs/
 *.pt
 *.npz
+books/
+data_d16/
+scripts/
