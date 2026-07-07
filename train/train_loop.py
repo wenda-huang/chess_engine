@@ -24,6 +24,18 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import os
+
+# Must run before numpy/torch import — each worker is a separate process and
+# OpenBLAS defaults to 64 threads, which exhausts pthread limits with many workers.
+for _thread_var in (
+    "OPENBLAS_NUM_THREADS",
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+):
+    os.environ[_thread_var] = "1"
+
 import random
 from typing import List, Optional, Tuple
 
@@ -67,8 +79,14 @@ def _sp_init(
     # Pin each worker to one CPU thread so N workers don't each spawn N intra-op
     # threads and thrash the cores.
     os.environ["CHESSAI_INFER"] = "torch"
-    os.environ.setdefault("OMP_NUM_THREADS", "1")
-    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    for _thread_var in (
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ):
+        os.environ[_thread_var] = "1"
     try:
         torch.set_num_threads(1)
     except Exception:
@@ -352,6 +370,23 @@ def train_selfplay(
 
     parallel = workers and workers > 1
     sp_device = selfplay_device or ("cpu" if parallel else device)
+
+    for _thread_var in (
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "CHESSAI_INFER",
+    ):
+        if _thread_var == "CHESSAI_INFER":
+            os.environ[_thread_var] = "torch"
+        else:
+            os.environ[_thread_var] = "1"
+    try:
+        torch.set_num_threads(1)
+    except Exception:
+        pass
 
     teacher = None
     tablebase = try_load_tablebase(config.syzygy_path)

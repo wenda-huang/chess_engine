@@ -123,6 +123,12 @@ export CHESSAI_INFER="${CHESSAI_INFER:-onnx-int8}"
 export CHESSAI_ONNX="${CHESSAI_ONNX:-$ROOT/models/supervised_big.int8.onnx}"
 export OPENING_BOOK="${OPENING_BOOK:-$ROOT/books/opening.bin}"
 export SYZYGY_PATH="${SYZYGY_PATH:-$ROOT/books/syzygy}"
+# Self-play uses many processes — pin BLAS/torch to 1 thread each.
+export OPENBLAS_NUM_THREADS=1
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
 EOF
 echo "==> Wrote $ENV_FILE"
 
