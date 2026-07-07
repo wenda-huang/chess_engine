@@ -1,6 +1,7 @@
 """The policy+value network (a small AlphaZero-style ResNet)."""
 from __future__ import annotations
 
+import os
 from typing import Tuple
 
 import torch
@@ -70,9 +71,21 @@ class ChessNet(nn.Module):
         return policy_logits, value
 
 
-def build_model(config: ModelConfig | None = None, device: str = "cpu") -> ChessNet:
+def build_model(
+    config: ModelConfig | None = None,
+    device: str = "cpu",
+    compile_model: bool | None = None,
+) -> ChessNet:
     model = ChessNet(config)
     model.to(device)
+    if compile_model is None:
+        compile_model = os.environ.get("CHESSAI_COMPILE", "").lower() in ("1", "true", "yes")
+    if compile_model and hasattr(torch, "compile"):
+        mode = "reduce-overhead" if device == "cuda" else "default"
+        try:
+            model = torch.compile(model, mode=mode)
+        except Exception:
+            pass
     return model
 
 
@@ -87,10 +100,12 @@ def save_checkpoint(path: str, model: ChessNet, meta: dict | None = None) -> Non
     )
 
 
-def load_checkpoint(path: str, device: str = "cpu") -> Tuple[ChessNet, dict]:
+def load_checkpoint(
+    path: str, device: str = "cpu", compile_model: bool | None = None
+) -> Tuple[ChessNet, dict]:
     ckpt = torch.load(path, map_location=device)
     cfg = ModelConfig(**ckpt.get("model_config", {}))
-    model = build_model(cfg, device=device)
+    model = build_model(cfg, device=device, compile_model=compile_model)
     model.load_state_dict(ckpt["state_dict"])
     model.eval()
     return model, ckpt.get("meta", {})

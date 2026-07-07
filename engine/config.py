@@ -70,9 +70,14 @@ class Config:
 
     # Search defaults.
     mcts_simulations: int = 160
+    mcts_batch_size: int = 32
+    mcts_virtual_loss: int = 3
+    nn_cache_size: int = 50_000
+    infer_backend: str = "torch"  # torch | onnx | onnx-int8 | tensorrt
     c_puct: float = 1.5
     dirichlet_alpha: float = 0.3
     dirichlet_epsilon: float = 0.25
+    use_torch_compile: bool = False  # set True or CHESSAI_COMPILE=1 on CUDA
 
     def ensure_dirs(self) -> None:
         for d in (self.models_dir, self.data_dir, self.logs_dir):

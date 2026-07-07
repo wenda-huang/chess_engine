@@ -256,6 +256,20 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
     print(result, flush=True)
 
 
+def cmd_export_onnx(args: argparse.Namespace) -> None:
+    from engine.inference import export_onnx, onnx_paths_for_checkpoint
+
+    path = export_onnx(args.checkpoint, out_path=args.out, int8=args.int8)
+    fp32, quant = onnx_paths_for_checkpoint(args.checkpoint, int8=True)
+    print(f"Exported ONNX to {path}")
+    if args.int8:
+        print(f"  fp32 sidecar: {fp32}")
+        print(f"  int8 model:   {quant}")
+    print("Use with:")
+    print(f"  set CHESSAI_INFER={'onnx-int8' if args.int8 else 'onnx'}")
+    print(f"  set CHESSAI_ONNX={path}")
+
+
 def cmd_serve(args: argparse.Namespace) -> None:
     import uvicorn
 
@@ -353,6 +367,12 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--checkpoint", default="models/selfplay.pt")
     pr.add_argument("--n", type=int, default=1024, help="Number of positions to sample")
     pr.set_defaults(func=cmd_probe)
+
+    ex = sub.add_parser("export-onnx", help="Export checkpoint to ONNX (optional int8 quant)")
+    ex.add_argument("--checkpoint", default="models/supervised_big.pt")
+    ex.add_argument("--out", default=None, help="Output .onnx path (default: beside checkpoint)")
+    ex.add_argument("--int8", action="store_true", help="Also write dynamic int8 quantized model")
+    ex.set_defaults(func=cmd_export_onnx)
 
     e = sub.add_parser("evaluate", help="Estimate Elo vs Stockfish")
     e.add_argument("--checkpoint", default="models/best.pt")

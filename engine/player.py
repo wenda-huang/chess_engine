@@ -10,19 +10,34 @@ import numpy as np
 from engine.config import Config
 from engine.encoding import POLICY_SIZE, move_to_index
 from engine.mcts import MCTS, Node, net_eval
+from engine.inference import InferenceRunner, create_inference_runner
 from engine.model import ChessNet
 
 
 class EnginePlayer:
-    def __init__(self, model: ChessNet, config: Optional[Config] = None, use_books: bool = False):
-        self.model = model
+    def __init__(
+        self,
+        model: Optional[ChessNet] = None,
+        config: Optional[Config] = None,
+        use_books: bool = False,
+        runner: Optional[InferenceRunner] = None,
+        checkpoint: Optional[str] = None,
+    ):
         self.config = config or Config()
+        if runner is None:
+            runner = create_inference_runner(
+                config=self.config, checkpoint=checkpoint, model=model
+            )
+        self.runner = runner
+        self.model = runner.model
         self.mcts = MCTS(
-            model,
-            device=self.config.device,
+            runner,
             c_puct=self.config.c_puct,
             dirichlet_alpha=self.config.dirichlet_alpha,
             dirichlet_epsilon=self.config.dirichlet_epsilon,
+            batch_size=self.config.mcts_batch_size,
+            virtual_loss=self.config.mcts_virtual_loss,
+            nn_cache_size=self.config.nn_cache_size,
         )
         # Opening book / endgame tablebase are only loaded for play & analysis;
         # training and Elo evaluation use the raw net (use_books=False).
@@ -123,7 +138,7 @@ class EnginePlayer:
         sims = simulations or self.config.mcts_simulations
         root = self.search(board, sims)
         # Direct net value for the position (side-to-move perspective).
-        _, net_value = net_eval(board, self.model, self.config.device)
+        _, net_value = net_eval(board, self.runner)
 
         # Opening book / tablebase annotations (analysis only).
         book_move = None

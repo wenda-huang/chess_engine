@@ -24,7 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from engine.config import Config
-from engine.model import build_model, load_checkpoint
+from engine.model import build_model
 from engine.player import EnginePlayer
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -62,13 +62,16 @@ class EngineHolder:
         with self.lock:
             checkpoint = checkpoint or self._default_checkpoint()
             if checkpoint and os.path.exists(checkpoint):
-                model, _ = load_checkpoint(checkpoint, device=self.cfg.device)
                 self.checkpoint_name = os.path.basename(checkpoint)
             else:
-                model = build_model(self.cfg.model, device=self.cfg.device)
+                checkpoint = None
                 self.checkpoint_name = "(untrained)"
-            model.eval()
-            self._player = EnginePlayer(model, self.cfg, use_books=True)
+            self._player = EnginePlayer(
+                config=self.cfg,
+                checkpoint=checkpoint,
+                model=None if checkpoint else build_model(self.cfg.model, device=self.cfg.device),
+                use_books=True,
+            )
 
     @property
     def player(self) -> EnginePlayer:
