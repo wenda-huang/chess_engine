@@ -134,14 +134,25 @@ def cmd_selfplay(args: argparse.Namespace) -> None:
         sup_fraction=args.sup_fraction,
         arena_every=args.arena_every,
         arena_games=args.arena_games,
+        arena_sims=args.arena_sims,
+        arena_opening_pool=args.arena_opening_pool,
+        arena_book_fraction=args.arena_book_fraction,
         arena_opening_min=args.arena_opening_min,
         arena_opening_max=args.arena_opening_max,
         arena_temperature=args.arena_temperature,
         arena_temp_moves=args.arena_temp_moves,
         gate_threshold=args.gate_threshold,
+        gate_min_games=args.gate_min_games,
+        gate_require_significance=not args.no_gate_significance,
+        temperature_moves=args.temperature_moves,
+        resign=not args.no_resign,
+        resign_threshold=args.resign_threshold,
+        resign_streak=args.resign_streak,
+        complete_fraction=args.complete_fraction,
         eval_every=args.eval_every,
         eval_games=args.eval_games,
         eval_skill=args.eval_skill,
+        eval_sims=args.eval_sims,
     )
     print(f"Saved self-play checkpoint to {path}")
 
@@ -336,7 +347,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("selfplay", help="Self-play refinement loop (arena-gated)")
     sp.add_argument("--iterations", type=int, default=40)
     sp.add_argument("--games-per-iter", type=int, default=48)
-    sp.add_argument("--sims", type=int, default=200)
+    sp.add_argument("--sims", type=int, default=400, help="MCTS sims per self-play move")
+    sp.add_argument("--temperature-moves", type=int, default=25,
+                    help="Plies with temperature=1.0 before switching to greedy play")
     sp.add_argument("--train-steps", type=int, default=200)
     sp.add_argument("--batch-size", type=int, default=256)
     sp.add_argument("--lr", type=float, default=1e-4, help="Learning rate (keep low to avoid forgetting)")
@@ -359,22 +372,52 @@ def build_parser() -> argparse.ArgumentParser:
         "--sup-fraction", type=float, default=0.5,
         help="Fraction of each training batch drawn from the labeled corpus (anti-forgetting)",
     )
+    sp.add_argument("--no-resign", action="store_true",
+                    help="Disable early resignation in self-play games")
+    sp.add_argument("--resign-threshold", type=float, default=0.95,
+                    help="Resign if value below -threshold for resign-streak plies")
+    sp.add_argument("--resign-streak", type=int, default=3)
+    sp.add_argument("--complete-fraction", type=float, default=0.08,
+                    help="Fraction of self-play games that always play to completion")
     sp.add_argument("--arena-every", type=int, default=3, help="Run arena gating every N iters")
-    sp.add_argument("--arena-games", type=int, default=16, help="Games in the arena (played as mirrored pairs)")
-    sp.add_argument("--arena-opening-min", type=int, default=2, help="Min random opening plies per arena pair")
-    sp.add_argument("--arena-opening-max", type=int, default=4, help="Max random opening plies per arena pair")
+    sp.add_argument(
+        "--arena-games", type=int, default=200,
+        help="Games in the arena (played as mirrored pairs; use >=200 for reliable gating)",
+    )
+    sp.add_argument("--arena-sims", type=int, default=None,
+                    help="MCTS sims for arena (default: same as --sims)")
+    sp.add_argument("--arena-opening-pool", type=int, default=50,
+                    help="Fixed pool of varied openings reused across arena pairs")
+    sp.add_argument("--arena-book-fraction", type=float, default=0.7,
+                    help="Fraction of arena openings sampled from the Polyglot book (rest random)")
+    sp.add_argument("--arena-opening-min", type=int, default=6,
+                    help="Min book-line plies when building opening pool")
+    sp.add_argument("--arena-opening-max", type=int, default=24,
+                    help="Max book-line plies when building opening pool")
     sp.add_argument(
         "--arena-temperature", type=float, default=0.0,
-        help="Move-selection temperature for the first few arena moves (adds noise/decisiveness)",
+        help="Move-selection temperature for arena (0 = deterministic eval)",
     )
-    sp.add_argument("--arena-temp-moves", type=int, default=4, help="Plies the arena temperature applies for")
+    sp.add_argument("--arena-temp-moves", type=int, default=0,
+                    help="Plies the arena temperature applies for (0 = none)")
     sp.add_argument(
         "--gate-threshold", type=float, default=0.55,
         help="Candidate must score >= this vs champion to be promoted",
     )
-    sp.add_argument("--eval-every", type=int, default=0, help="Optional absolute Elo check vs Stockfish (0=off)")
+    sp.add_argument(
+        "--gate-min-games", type=int, default=200,
+        help="Minimum arena games before a promotion decision is allowed",
+    )
+    sp.add_argument(
+        "--no-gate-significance", action="store_true",
+        help="Skip one-sided significance test (promote on score alone)",
+    )
+    sp.add_argument("--eval-every", type=int, default=6,
+                    help="Absolute Elo check vs Stockfish every N iters (0=off)")
     sp.add_argument("--eval-games", type=int, default=20, help="Games per in-loop Elo eval")
     sp.add_argument("--eval-skill", type=int, default=5, help="Stockfish skill for in-loop eval")
+    sp.add_argument("--eval-sims", type=int, default=None,
+                    help="MCTS sims for in-loop eval (default: same as --sims)")
     sp.set_defaults(func=cmd_selfplay)
 
     pr = sub.add_parser("probe", help="Check the value head for collapse (pred vs target)")

@@ -1,16 +1,14 @@
 """Opening book (Polyglot) and endgame tablebase (Syzygy) helpers.
 
-These are used only for actual play and board-editor analysis -- they give a
-small net perfect opening theory and perfect low-piece endgames, which is where
-it is weakest. Training and Elo evaluation deliberately do NOT use them, so we
-keep measuring the raw network.
-
-Both wrappers are best-effort: if the files are missing or a probe fails, the
-methods return ``None`` and the caller falls back to the neural net.
+These are used for actual play, board-editor analysis, arena gating openings,
+and ending games once Syzygy proves the result. Training labels still come from
+Stockfish; self-play/arena use tablebases only to stop solved endgames early.
 """
 from __future__ import annotations
 
-from typing import Optional
+import os
+import random
+from typing import List, Optional
 
 import chess
 import chess.polyglot
@@ -99,3 +97,132 @@ class Tablebase:
             self.tb.close()
         except Exception:
             pass
+
+
+def try_load_opening_book(path: str) -> Optional[OpeningBook]:
+    if path and os.path.exists(path):
+        try:
+            return OpeningBook(path)
+        except Exception:
+            return None
+    return None
+
+
+def try_load_tablebase(path: str) -> Optional[Tablebase]:
+    if path and os.path.isdir(path):
+        try:
+            return Tablebase(path)
+        except Exception:
+            return None
+    return None
+
+
+def tablebase_forced_white_result(board: chess.Board, tb: Tablebase) -> Optional[float]:
+    """If Syzygy proves the outcome, return white_result (1/0/-1). Else None.
+
+    - WDL -2: side to move is lost -> immediate resignation
+    - WDL  0: proven draw -> claim draw
+    - WDL  2: winning for STM -> keep playing (opponent resigns on their -2 turn)
+    """
+    if not tb.available(board):
+        return None
+    wdl = tb.probe_wdl(board)
+    if wdl is None:
+        return None
+    if wdl == -2:
+        return -1.0 if board.turn == chess.WHITE else 1.0
+    if wdl == 0:
+        return 0.0
+    return None
+
+
+def sample_book_opening(
+    book: OpeningBook,
+    rng: random.Random,
+    min_plies: int = 6,
+    max_plies: int = 24,
+    stop_prob: float = 0.12,
+) -> Optional[List[chess.Move]]:
+    """Walk the Polyglot book from the start position; stop when the book ends."""
+    board = chess.Board()
+    moves: List[chess.Move] = []
+    for _ in range(max_plies):
+        mv = book.move(board, weighted=True)
+        if mv is None:
+            break
+        moves.append(mv)
+        board.push(mv)
+        if len(moves) >= min_plies and rng.random() < stop_prob:
+            break
+    return moves if len(moves) >= min_plies else None
+
+
+def sample_random_opening(
+    rng: random.Random,
+    min_plies: int = 4,
+    max_plies: int = 12,
+) -> List[chess.Move]:
+    """Uniform-random legal moves (legacy arena variety)."""
+    board = chess.Board()
+    opening: List[chess.Move] = []
+    k = rng.randint(min_plies, max_plies)
+    for _ in range(k):
+        if board.is_game_over():
+            break
+        mv = rng.choice(list(board.legal_moves))
+        opening.append(mv)
+        board.push(mv)
+    return opening
+
+
+def build_mixed_opening_pool(
+    rng: random.Random,
+    size: int = 50,
+    book: Optional[OpeningBook] = None,
+    book_fraction: float = 0.7,
+    min_plies: int = 6,
+    max_plies: int = 24,
+    random_min_plies: int = 4,
+    random_max_plies: int = 12,
+) -> List[List[chess.Move]]:
+    """Build arena openings: mostly Polyglot book lines + some random lines."""
+    pool: List[List[chess.Move]] = []
+    seen: set[str] = set()
+
+    def add_opening(moves: List[chess.Move]) -> bool:
+        if not moves:
+            return False
+        key = " ".join(m.uci() for m in moves)
+        if key in seen:
+            return False
+        seen.add(key)
+        pool.append(moves)
+        return True
+
+    target_book = int(round(size * book_fraction)) if book is not None else 0
+    attempts = 0
+    max_attempts = max(size * 20, 200)
+
+    while book is not None and len(pool) < target_book and attempts < max_attempts:
+        attempts += 1
+        sampled = sample_book_opening(
+            book, rng, min_plies=min_plies, max_plies=max_plies,
+        )
+        if sampled is not None:
+            add_opening(sampled)
+
+    while len(pool) < size and attempts < max_attempts:
+        attempts += 1
+        if book is not None and rng.random() < book_fraction and len(pool) < target_book + 10:
+            sampled = sample_book_opening(
+                book, rng, min_plies=min_plies, max_plies=max_plies,
+            )
+            if sampled is not None and add_opening(sampled):
+                continue
+        add_opening(
+            sample_random_opening(
+                rng, min_plies=random_min_plies, max_plies=random_max_plies,
+            )
+        )
+
+    return pool

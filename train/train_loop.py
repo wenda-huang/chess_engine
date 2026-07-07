@@ -34,6 +34,12 @@ import torch.nn.functional as F
 
 from data.dataset import ReplayBuffer, StockfishDataset
 from engine.config import Config, ModelConfig
+from engine.books import (
+    build_mixed_opening_pool,
+    try_load_opening_book,
+    try_load_tablebase,
+    tablebase_forced_white_result,
+)
 from engine.model import build_model, load_checkpoint, save_checkpoint
 from engine.player import EnginePlayer
 from teacher.stockfish import StockfishTeacher
@@ -49,7 +55,15 @@ from train.supervised import policy_loss
 _SP: dict = {}
 
 
-def _sp_init(model_config: dict, config: Config, sp_device: str, sf_value_weight: float) -> None:
+def _sp_init(
+    model_config: dict,
+    config: Config,
+    sp_device: str,
+    sf_value_weight: float,
+    resign_cfg: dict,
+    opening_book_path: str,
+    syzygy_path: str,
+) -> None:
     # Pin each worker to one CPU thread so N workers don't each spawn N intra-op
     # threads and thrash the cores.
     try:
@@ -63,6 +77,9 @@ def _sp_init(model_config: dict, config: Config, sp_device: str, sf_value_weight
     _SP["version"] = None
     _SP["player"] = None
     _SP["sf_value_weight"] = sf_value_weight
+    _SP["resign_cfg"] = resign_cfg
+    _SP["tablebase"] = try_load_tablebase(syzygy_path)
+    _SP["opening_book"] = try_load_opening_book(opening_book_path)
     _SP["teacher"] = (
         StockfishTeacher(config.stockfish_path, depth=8, multipv=1)
         if sf_value_weight > 0.0
@@ -90,6 +107,8 @@ def _sp_play(task):
         teacher=_SP["teacher"],
         sf_value_weight=_SP["sf_value_weight"],
         rng=rng,
+        tablebase=_SP["tablebase"],
+        **_SP["resign_cfg"],
     )
     packed = [(p.astype(np.uint8), pi, float(z)) for (p, pi, z) in samples]
     return packed, float(white_result)
@@ -98,6 +117,30 @@ def _sp_play(task):
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+def _gate_promote(
+    wins: int,
+    draws: int,
+    losses: int,
+    threshold: float,
+    min_games: int,
+    require_significance: bool = True,
+) -> Tuple[bool, str]:
+    """Return (should_promote, reason)."""
+    n = wins + draws + losses
+    if n < min_games:
+        return False, f"insufficient_games ({n} < {min_games})"
+    score = (wins + 0.5 * draws) / n
+    if score < threshold:
+        return False, f"below_threshold ({score:.3f} < {threshold})"
+    if require_significance and n > 0:
+        # One-sided normal approx: H0 true score = 0.5 (even match).
+        se = 0.5 / (n ** 0.5)
+        z = (score - 0.5) / se
+        if z < 1.645:  # ~95% one-sided
+            return False, f"not_significant (z={z:.2f}, need >=1.645)"
+    return True, "promoted"
+
+
 def _sup_batch(dataset: StockfishDataset, n: int, device: str):
     """Sample ``n`` random ground-truth positions from the supervised corpus."""
     idxs = np.random.randint(0, len(dataset), size=n)
@@ -122,6 +165,7 @@ def _arena_game(
     temperature: float,
     temp_moves: int,
     max_moves: int = 240,
+    tablebase=None,
 ) -> float:
     """Play one arena game from a fixed opening. Returns white-perspective result
     (1.0 white win, 0.0 draw, -1.0 black win)."""
@@ -132,6 +176,11 @@ def _arena_game(
 
     n = 0
     while not board.is_game_over(claim_draw=True) and board.fullmove_number < max_moves:
+        if tablebase is not None:
+            wr = tablebase_forced_white_result(board, tablebase)
+            if wr is not None:
+                return wr
+
         player = white_player if board.turn == chess.WHITE else black_player
         temp = temperature if n < temp_moves else 0.0
         move, _ = player.select_move(
@@ -152,18 +201,20 @@ def _arena(
     games: int,
     sims: int,
     rng: random.Random,
-    opening_min: int = 2,
-    opening_max: int = 4,
+    opening_pool: Optional[List[List[chess.Move]]] = None,
+    opening_min: int = 4,
+    opening_max: int = 12,
     temperature: float = 0.0,
-    temp_moves: int = 4,
+    temp_moves: int = 0,
     progress: Optional[ProgressLogger] = None,
     iter_idx: int = 0,
+    tablebase=None,
 ) -> Tuple[float, int, int, int]:
     """Candidate-vs-champion match in *mirrored pairs*.
 
-    Each pair shares a random 2-4 ply opening and is played twice with colors
-    swapped, so opening/color imbalance cancels out and the score reflects real
-    strength difference rather than luck. Returns (candidate_score, W, D, L).
+    Each pair shares an opening (from ``opening_pool`` when provided) and is
+    played twice with colors swapped, so opening/color imbalance cancels out.
+    Returns (candidate_score, W, D, L).
     """
     pairs = max(1, games // 2)
     total = 0.0
@@ -180,22 +231,24 @@ def _arena(
             losses += 1
 
     for _ in range(pairs):
-        # Build a shared random opening.
-        board = chess.Board()
-        opening: List[chess.Move] = []
-        k = rng.randint(opening_min, opening_max)
-        for _ in range(k):
-            if board.is_game_over():
-                break
-            mv = rng.choice(list(board.legal_moves))
-            opening.append(mv)
-            board.push(mv)
+        if opening_pool:
+            opening = opening_pool[rng.randrange(len(opening_pool))]
+        else:
+            board = chess.Board()
+            opening = []
+            k = rng.randint(opening_min, opening_max)
+            for _ in range(k):
+                if board.is_game_over():
+                    break
+                mv = rng.choice(list(board.legal_moves))
+                opening.append(mv)
+                board.push(mv)
 
         # Game A: candidate as White.
-        wr = _arena_game(cand_player, champ_player, opening, sims, temperature, temp_moves)
+        wr = _arena_game(cand_player, champ_player, opening, sims, temperature, temp_moves, tablebase=tablebase)
         cand_a = (wr + 1.0) / 2.0
         # Game B (mirror): candidate as Black.
-        wr2 = _arena_game(champ_player, cand_player, opening, sims, temperature, temp_moves)
+        wr2 = _arena_game(champ_player, cand_player, opening, sims, temperature, temp_moves, tablebase=tablebase)
         cand_b = (1.0 - wr2) / 2.0
 
         tally(cand_a)
@@ -222,28 +275,44 @@ def train_selfplay(
     init_checkpoint: Optional[str] = "models/supervised.pt",
     out_name: str = "selfplay.pt",
     sf_value_weight: float = 0.0,
-    temperature_moves: int = 20,
+    temperature_moves: int = 25,
     workers: int = 1,
     selfplay_device: Optional[str] = None,
     sup_fraction: float = 0.5,
+    resign: bool = True,
+    resign_threshold: float = 0.95,
+    resign_streak: int = 3,
+    complete_fraction: float = 0.08,
     arena_every: int = 3,
-    arena_games: int = 16,
+    arena_games: int = 200,
     arena_sims: Optional[int] = None,
-    arena_opening_min: int = 2,
-    arena_opening_max: int = 4,
+    arena_opening_pool: int = 50,
+    arena_book_fraction: float = 0.7,
+    arena_opening_min: int = 6,
+    arena_opening_max: int = 24,
     arena_temperature: float = 0.0,
-    arena_temp_moves: int = 4,
+    arena_temp_moves: int = 0,
     gate_threshold: float = 0.55,
+    gate_min_games: int = 200,
+    gate_require_significance: bool = True,
     eval_every: int = 0,
     eval_games: int = 20,
     eval_skill: int = 5,
+    eval_sims: Optional[int] = None,
     progress: Optional[ProgressLogger] = None,
 ) -> str:
     config = config or Config()
     config.ensure_dirs()
     progress = progress or ProgressLogger(os.path.join(config.logs_dir, "selfplay.jsonl"))
     device = config.device
-    arena_sims = arena_sims or max(100, sims // 2)
+    arena_sims = arena_sims or sims
+    eval_sims = eval_sims or sims
+    resign_cfg = {
+        "resign": resign,
+        "resign_threshold": resign_threshold,
+        "resign_streak": resign_streak,
+        "complete_fraction": complete_fraction,
+    }
 
     # Champion (generates games, is the deployed net) and candidate (trained).
     if init_checkpoint and os.path.exists(init_checkpoint):
@@ -273,6 +342,8 @@ def train_selfplay(
     sp_device = selfplay_device or ("cpu" if parallel else device)
 
     teacher = None
+    tablebase = try_load_tablebase(config.syzygy_path)
+    opening_book = try_load_opening_book(config.opening_book_path)
     if sf_value_weight > 0.0 and not parallel:
         teacher = StockfishTeacher(config.stockfish_path, depth=8, multipv=1)
 
@@ -290,10 +361,23 @@ def train_selfplay(
         pool = ctx.Pool(
             processes=workers,
             initializer=_sp_init,
-            initargs=(vars(champion.config), config, sp_device, sf_value_weight),
+            initargs=(
+                vars(champion.config), config, sp_device, sf_value_weight, resign_cfg,
+                config.opening_book_path, config.syzygy_path,
+            ),
         )
 
     rng = random.Random(20240703)
+    opening_pool = build_mixed_opening_pool(
+        rng,
+        size=arena_opening_pool,
+        book=opening_book,
+        book_fraction=arena_book_fraction,
+        min_plies=arena_opening_min,
+        max_plies=arena_opening_max,
+        random_min_plies=4,
+        random_max_plies=12,
+    )
 
     progress.log(
         {
@@ -311,6 +395,12 @@ def train_selfplay(
             "arena_every": arena_every,
             "arena_games": arena_games,
             "gate_threshold": gate_threshold,
+            "gate_min_games": gate_min_games,
+            "arena_opening_pool": arena_opening_pool,
+            "arena_book_fraction": arena_book_fraction,
+            "opening_book": bool(opening_book),
+            "tablebase": bool(tablebase),
+            "resign": resign,
         }
     )
 
@@ -349,6 +439,8 @@ def train_selfplay(
                         temperature_moves=temperature_moves,
                         teacher=teacher,
                         sf_value_weight=sf_value_weight,
+                        tablebase=tablebase,
+                        **resign_cfg,
                     )
                     buffer.add_game(samples)
                     progress.log(
@@ -408,11 +500,15 @@ def train_selfplay(
                 champion.eval()
                 score, w, d, l = _arena(
                     cand_player, champ_player, arena_games, arena_sims, rng,
+                    opening_pool=opening_pool,
                     opening_min=arena_opening_min, opening_max=arena_opening_max,
                     temperature=arena_temperature, temp_moves=arena_temp_moves,
-                    progress=progress, iter_idx=it,
+                    progress=progress, iter_idx=it, tablebase=tablebase,
                 )
-                if score >= gate_threshold:
+                promote, reason = _gate_promote(
+                    w, d, l, gate_threshold, gate_min_games, gate_require_significance,
+                )
+                if promote:
                     champion.load_state_dict(candidate.state_dict())
                     champ_version += 1
                     save_checkpoint(weights_path, champion)  # refresh workers
@@ -422,6 +518,7 @@ def train_selfplay(
                             "event": "promote",
                             "iter": it,
                             "arena_score": round(score, 3),
+                            "gate_reason": reason,
                             "wins": w, "draws": d, "losses": l,
                             "champ_version": champ_version,
                         }
@@ -434,6 +531,7 @@ def train_selfplay(
                             "event": "arena_reject",
                             "iter": it,
                             "arena_score": round(score, 3),
+                            "gate_reason": reason,
                             "wins": w, "draws": d, "losses": l,
                         }
                     )
@@ -443,13 +541,17 @@ def train_selfplay(
                 champion.eval()
                 result = estimate_elo(
                     champ_player, config, games=eval_games,
-                    sims=max(40, sims // 2), skill_level=eval_skill, progress=progress,
+                    sims=eval_sims, skill_level=eval_skill, progress=progress,
                 )
                 progress.log({"event": "champion_elo", "iter": it,
                               "estimated_elo": result["estimated_elo"]})
     finally:
         if teacher is not None:
             teacher.close()
+        if opening_book is not None:
+            opening_book.close()
+        if tablebase is not None:
+            tablebase.close()
         if pool is not None:
             pool.close()
             pool.join()
