@@ -55,7 +55,12 @@ class ONNXRunner(InferenceRunner):
 
         if providers is None:
             providers = ort_providers()
-        self.session = ort.InferenceSession(onnx_path, providers=providers)
+        opts = ort.SessionOptions()
+        opts.intra_op_num_threads = int(os.environ.get("CHESSAI_ORT_THREADS", "2"))
+        opts.inter_op_num_threads = 1
+        self.session = ort.InferenceSession(
+            onnx_path, sess_options=opts, providers=providers,
+        )
         self.input_name = self.session.get_inputs()[0].name
 
     def eval_batch(self, planes: np.ndarray) -> BatchOut:
@@ -166,12 +171,18 @@ def create_inference_runner(
     config: Optional[Config] = None,
     checkpoint: Optional[str] = None,
     model: Optional[ChessNet] = None,
+    infer_backend: Optional[str] = None,
 ) -> InferenceRunner:
-    """Build the inference backend selected by ``CHESSAI_INFER`` / config."""
-    config = config or Config()
-    infer = resolve_infer_backend(config, checkpoint)
+    """Build the inference backend selected by ``CHESSAI_INFER`` / config.
 
-    if infer in ("onnx", "onnx-int8", "int8", "tensorrt"):
+    When ``model`` is already loaded (e.g. self-play workers), always use PyTorch
+    regardless of ``CHESSAI_INFER`` — spawning one ONNX session per worker exhausts
+    pthread limits on multi-process runs.
+    """
+    config = config or Config()
+    infer = (infer_backend or resolve_infer_backend(config, checkpoint)).lower()
+
+    if infer in ("onnx", "onnx-int8", "int8", "tensorrt") and model is None:
         int8 = infer in ("onnx-int8", "int8")
         onnx_env = os.environ.get("CHESSAI_ONNX")
         if onnx_env:

@@ -66,6 +66,9 @@ def _sp_init(
 ) -> None:
     # Pin each worker to one CPU thread so N workers don't each spawn N intra-op
     # threads and thrash the cores.
+    os.environ["CHESSAI_INFER"] = "torch"
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
     try:
         torch.set_num_threads(1)
     except Exception:
@@ -88,11 +91,20 @@ def _sp_init(
 
 
 def _sp_play(task):
+    try:
+        return _sp_play_inner(task)
+    except Exception:
+        import traceback
+
+        return {"__error__": traceback.format_exc()}
+
+
+def _sp_play_inner(task):
     version, weights_path, sims, temperature_moves, seed = task
     # Reload weights only when the champion changes (a new promotion version).
     if _SP["version"] != version:
         model = build_model(ModelConfig(**_SP["model_config"]), device=_SP["device"])
-        ckpt = torch.load(weights_path, map_location=_SP["device"])
+        ckpt = torch.load(weights_path, map_location=_SP["device"], weights_only=False)
         model.load_state_dict(ckpt["state_dict"])
         model.eval()
         _SP["player"] = EnginePlayer(model, _SP["config"])
@@ -417,7 +429,11 @@ def train_selfplay(
                     for g in range(games_per_iter)
                 ]
                 done = 0
-                for samples, white_result in pool.imap_unordered(_sp_play, tasks):
+                for result in pool.imap_unordered(_sp_play, tasks):
+                    if isinstance(result, dict) and "__error__" in result:
+                        progress.log({"event": "worker_error", "iter": it, "traceback": result["__error__"]})
+                        raise RuntimeError(f"Self-play worker failed:\n{result['__error__']}")
+                    samples, white_result = result
                     buffer.add_game(samples)
                     done += 1
                     progress.log(

@@ -34,27 +34,60 @@ source .venv/bin/activate
 echo "==> Python: $(python --version)"
 
 # --- 3. PyTorch (CUDA if available) ---
-if python -c "import torch; exit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
-  echo "==> torch already installed with CUDA"
-else
-  echo "==> Installing PyTorch..."
+install_torch() {
+  pip install --upgrade pip
   if command -v nvidia-smi >/dev/null 2>&1; then
-    pip install --upgrade pip
-    pip install torch --index-url https://download.pytorch.org/whl/cu124
+    # RTX 50-series (Blackwell sm_120) needs PyTorch >=2.7 built with CUDA 12.8 (cu128).
+    GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || true)"
+    if echo "$GPU_NAME" | grep -qiE 'RTX 50|Blackwell'; then
+      echo "==> Blackwell GPU detected ($GPU_NAME) — installing PyTorch cu128..."
+      # Chess only needs torch (not torchvision). Stable cu128 supports sm_120.
+      pip install torch --index-url https://download.pytorch.org/whl/cu128 \
+        || pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu128 --no-cache-dir
+    else
+      echo "==> Installing PyTorch (CUDA 12.4 wheels)..."
+      pip install torch --index-url https://download.pytorch.org/whl/cu124
+    fi
   else
-    pip install --upgrade pip
     pip install torch
   fi
+}
+
+if python -c "import torch; exit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
+  if python -c "
+import torch
+if not torch.cuda.is_available():
+    raise SystemExit(1)
+cap = torch.cuda.get_device_capability()
+archs = torch.cuda.get_arch_list() if hasattr(torch.cuda, 'get_arch_list') else []
+if cap >= (12, 0) and archs and 'sm_120' not in archs and 'compute_120' not in ''.join(archs):
+    raise SystemExit(1)
+" 2>/dev/null; then
+    echo "==> torch already installed with compatible CUDA"
+  else
+    echo "==> Reinstalling PyTorch (GPU arch mismatch)..."
+    pip uninstall -y torch torchvision torchaudio 2>/dev/null || true
+    install_torch
+  fi
+else
+  echo "==> Installing PyTorch..."
+  install_torch
 fi
 
 pip install -r requirements.txt
 
 # --- 4. Sanity checks ---
 python -c "
-import torch, chess, onnxruntime as ort
-print('torch', torch.__version__, 'cuda', torch.cuda.is_available())
-print('chess', chess.__version__)
-print('onnxruntime', ort.__version__)
+import torch
+print('torch', torch.__version__, 'cuda', torch.version.cuda)
+print('device', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu')
+if torch.cuda.is_available():
+    print('capability', torch.cuda.get_device_capability())
+    if hasattr(torch.cuda, 'get_arch_list'):
+        print('arch_list', torch.cuda.get_arch_list())
+    x = torch.randn(4, device='cuda')
+    y = x @ x
+    print('matmul ok', y.shape)
 "
 
 # --- 5. Verify transferred assets ---

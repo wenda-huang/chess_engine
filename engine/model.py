@@ -118,7 +118,7 @@ def save_checkpoint(path: str, model: ChessNet, meta: dict | None = None) -> Non
 def load_checkpoint(
     path: str, device: str = "cpu", compile_model: bool | None = None
 ) -> Tuple[ChessNet, dict]:
-    ckpt = torch.load(path, map_location=device)
+    ckpt = torch.load(path, map_location=device, weights_only=False)
     cfg = ModelConfig(**ckpt.get("model_config", {}))
     # Load weights on the raw module first; compiling before load_state_dict
     # wraps keys as _orig_mod.* and breaks checkpoint loading.
