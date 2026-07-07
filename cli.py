@@ -217,18 +217,16 @@ def cmd_probe(args: argparse.Namespace) -> None:
 
 
 def cmd_evaluate(args: argparse.Namespace) -> None:
-    from engine.model import build_model, load_checkpoint
     from engine.player import EnginePlayer
     from train.evaluate import estimate_elo
 
     config = Config()
-    if args.checkpoint and os.path.exists(args.checkpoint):
-        model, _ = load_checkpoint(args.checkpoint, device=config.device)
-    else:
+    checkpoint = args.checkpoint if args.checkpoint and os.path.exists(args.checkpoint) else None
+    if not checkpoint:
         print("No checkpoint found; evaluating a randomly-initialized net.")
-        model = build_model(config.model, device=config.device)
-    model.eval()
-    player = EnginePlayer(model, config, use_books=args.use_books)
+    infer = os.environ.get("CHESSAI_INFER", config.infer_backend)
+    print(f"Inference: {infer}", flush=True)
+    player = EnginePlayer(config=config, checkpoint=checkpoint, use_books=args.use_books)
     if args.use_books:
         print(
             f"Books: opening={'on' if player.opening_book else 'off'} "

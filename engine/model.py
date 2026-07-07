@@ -12,6 +12,25 @@ from engine.config import ModelConfig
 from engine.encoding import NUM_PLANES, POLICY_SIZE
 
 
+def _can_use_inductor(device: str) -> bool:
+    """CPU torch.compile on Windows needs MSVC (cl.exe) for the inductor backend."""
+    if device != "cpu" or os.name != "nt":
+        return True
+    import shutil
+
+    return shutil.which("cl") is not None
+
+
+def _maybe_torch_compile(model: ChessNet, device: str) -> ChessNet:
+    if not hasattr(torch, "compile") or not _can_use_inductor(device):
+        return model
+    mode = "reduce-overhead" if device == "cuda" else "default"
+    try:
+        return torch.compile(model, mode=mode)
+    except Exception:
+        return model
+
+
 class ResidualBlock(nn.Module):
     def __init__(self, channels: int):
         super().__init__()
@@ -80,12 +99,8 @@ def build_model(
     model.to(device)
     if compile_model is None:
         compile_model = os.environ.get("CHESSAI_COMPILE", "").lower() in ("1", "true", "yes")
-    if compile_model and hasattr(torch, "compile"):
-        mode = "reduce-overhead" if device == "cuda" else "default"
-        try:
-            model = torch.compile(model, mode=mode)
-        except Exception:
-            pass
+    if compile_model:
+        model = _maybe_torch_compile(model, device)
     return model
 
 
@@ -105,7 +120,13 @@ def load_checkpoint(
 ) -> Tuple[ChessNet, dict]:
     ckpt = torch.load(path, map_location=device)
     cfg = ModelConfig(**ckpt.get("model_config", {}))
-    model = build_model(cfg, device=device, compile_model=compile_model)
+    # Load weights on the raw module first; compiling before load_state_dict
+    # wraps keys as _orig_mod.* and breaks checkpoint loading.
+    model = build_model(cfg, device=device, compile_model=False)
     model.load_state_dict(ckpt["state_dict"])
     model.eval()
+    if compile_model is None:
+        compile_model = os.environ.get("CHESSAI_COMPILE", "").lower() in ("1", "true", "yes")
+    if compile_model:
+        model = _maybe_torch_compile(model, device)
     return model, ckpt.get("meta", {})
