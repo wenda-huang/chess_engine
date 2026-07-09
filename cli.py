@@ -127,6 +127,7 @@ def cmd_selfplay(args: argparse.Namespace) -> None:
         lr=args.lr,
         init_checkpoint=args.init,
         out_name=args.out,
+        best_name=args.best_out,
         buffer_capacity=args.buffer_capacity,
         sf_value_weight=args.sf_value_weight,
         workers=args.workers,
@@ -355,6 +356,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--lr", type=float, default=1e-4, help="Learning rate (keep low to avoid forgetting)")
     sp.add_argument("--init", default="models/supervised.pt")
     sp.add_argument("--out", default="selfplay.pt")
+    sp.add_argument(
+        "--best-out", default="best.pt",
+        help="Champion checkpoint written on promotion (default: best.pt)",
+    )
     sp.add_argument("--sf-value-weight", type=float, default=0.0)
     sp.add_argument(
         "--buffer-capacity", type=int, default=300_000,

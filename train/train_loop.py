@@ -304,6 +304,7 @@ def train_selfplay(
     buffer_capacity: int = 300_000,
     init_checkpoint: Optional[str] = "models/supervised.pt",
     out_name: str = "selfplay.pt",
+    best_name: str = "best.pt",
     sf_value_weight: float = 0.0,
     temperature_moves: int = 25,
     workers: int = 1,
@@ -395,7 +396,7 @@ def train_selfplay(
         teacher = StockfishTeacher(config.stockfish_path, depth=8, multipv=1)
 
     out_path = os.path.join(config.models_dir, out_name)
-    best_path = os.path.join(config.models_dir, "best.pt")
+    best_path = os.path.join(config.models_dir, best_name)
     weights_path = os.path.join(config.models_dir, "_sp_weights.pt")
 
     # Publish the champion's weights for the workers (version bumps on promotion).
