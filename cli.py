@@ -386,8 +386,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Fraction of self-play games that always play to completion")
     sp.add_argument("--arena-every", type=int, default=3, help="Run arena gating every N iters")
     sp.add_argument(
-        "--arena-games", type=int, default=200,
-        help="Games in the arena (played as mirrored pairs; use >=200 for reliable gating)",
+        "--arena-games", type=int, default=300,
+        help="Games in the arena (played as mirrored pairs; use >=300 for reliable gating)",
     )
     sp.add_argument("--arena-sims", type=int, default=None,
                     help="MCTS sims for arena (default: same as --sims)")
@@ -410,7 +410,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Candidate must score >= this vs champion to be promoted",
     )
     sp.add_argument(
-        "--gate-min-games", type=int, default=200,
+        "--gate-min-games", type=int, default=300,
         help="Minimum arena games before a promotion decision is allowed",
     )
     sp.add_argument(
@@ -419,7 +419,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.add_argument("--eval-every", type=int, default=6,
                     help="Absolute Elo check vs Stockfish every N iters (0=off)")
-    sp.add_argument("--eval-games", type=int, default=20, help="Games per in-loop Elo eval")
+    sp.add_argument("--eval-games", type=int, default=50, help="Games per in-loop Elo eval")
     sp.add_argument("--eval-skill", type=int, default=5, help="Stockfish skill for in-loop eval")
     sp.add_argument("--eval-sims", type=int, default=None,
                     help="MCTS sims for in-loop eval (default: same as --sims)")
