@@ -31,9 +31,18 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 PROJECT_ROOT = os.path.dirname(BASE_DIR)
 
+
+def _abs_project_path(path: str) -> str:
+    """Resolve a path relative to the repo root."""
+    if os.path.isabs(path):
+        return path
+    return os.path.join(PROJECT_ROOT, path)
+
+
 app = FastAPI(title="AlphaZero Chess Engine")
 
 config = Config()
+config.models_dir = _abs_project_path(config.models_dir)
 config.ensure_dirs()
 
 DIFFICULTY_SIMS = {"easy": 200, "medium": 400, "hard": 800}
@@ -46,12 +55,16 @@ class EngineHolder:
         self.cfg = cfg
         self._player: Optional[EnginePlayer] = None
         self.checkpoint_name: Optional[str] = None
+        self.infer_backend: Optional[str] = None
+        self.infer_path: Optional[str] = None
         self.lock = threading.Lock()
 
     def _default_checkpoint(self) -> Optional[str]:
         env = os.environ.get("CHESSAI_CHECKPOINT")
-        if env and os.path.exists(env):
-            return env
+        if env:
+            path = _abs_project_path(env)
+            if os.path.exists(path):
+                return path
         for name in ("best_2.pt", "best.pt", "supervised_big.pt", "selfplay.pt", "supervised.pt"):
             path = os.path.join(self.cfg.models_dir, name)
             if os.path.exists(path):
@@ -60,7 +73,10 @@ class EngineHolder:
 
     def load(self, checkpoint: Optional[str] = None) -> None:
         with self.lock:
-            checkpoint = checkpoint or self._default_checkpoint()
+            if checkpoint:
+                checkpoint = _abs_project_path(checkpoint)
+            else:
+                checkpoint = self._default_checkpoint()
             if checkpoint and os.path.exists(checkpoint):
                 self.checkpoint_name = os.path.basename(checkpoint)
             else:
@@ -72,6 +88,24 @@ class EngineHolder:
                 model=None if checkpoint else build_model(self.cfg.model, device=self.cfg.device),
                 use_books=True,
             )
+            self._record_infer_backend(checkpoint)
+
+    def _record_infer_backend(self, checkpoint: Optional[str]) -> None:
+        from engine.inference import ONNXRunner, TorchRunner
+
+        runner = self._player.runner if self._player else None
+        if isinstance(runner, TorchRunner):
+            self.infer_backend = "torch"
+            self.infer_path = None
+        elif isinstance(runner, ONNXRunner):
+            self.infer_path = runner.onnx_path
+            if self.infer_path.endswith(".int8.onnx"):
+                self.infer_backend = "onnx-int8"
+            else:
+                self.infer_backend = "onnx"
+        else:
+            self.infer_backend = "unknown"
+            self.infer_path = None
 
     @property
     def player(self) -> EnginePlayer:
@@ -84,6 +118,27 @@ class EngineHolder:
 engine_holder = EngineHolder(config)
 games: Dict[str, chess.Board] = {}
 game_meta: Dict[str, dict] = {}
+
+
+@app.on_event("startup")
+def _load_engine_on_startup() -> None:
+    """Eager-load the default checkpoint so /api/checkpoints shows the active model."""
+    ckpt = engine_holder._default_checkpoint()
+    if ckpt:
+        print(f"Loading engine: {ckpt}", flush=True)
+    else:
+        print(
+            f"WARNING: no checkpoint found in {config.models_dir} "
+            f"(expected models/best_2.pt)",
+            flush=True,
+        )
+    engine_holder.load()
+    print(
+        f"Engine ready: {engine_holder.checkpoint_name} "
+        f"[{engine_holder.infer_backend}"
+        f"{': ' + engine_holder.infer_path if engine_holder.infer_path else ''}]",
+        flush=True,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -241,9 +296,14 @@ def state(game_id: str) -> dict:
 # --------------------------------------------------------------------------- #
 @app.get("/api/checkpoints")
 def checkpoints() -> dict:
+    if engine_holder._player is None:
+        engine_holder.load()
     paths = sorted(glob.glob(os.path.join(config.models_dir, "*.pt")))
     return {
         "active": engine_holder.checkpoint_name,
+        "loaded": engine_holder._player is not None,
+        "infer_backend": engine_holder.infer_backend,
+        "infer_path": engine_holder.infer_path,
         "checkpoints": [os.path.basename(p) for p in paths],
     }
 

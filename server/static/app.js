@@ -46,7 +46,16 @@ async function api(path, method = "GET", body = null) {
 async function refreshCheckpoints() {
   try {
     const data = await api("/api/checkpoints");
-    document.getElementById("active-checkpoint").textContent = data.active || "(none)";
+    const label =
+      data.active ||
+      (data.loaded ? "(untrained)" : "loading...");
+    document.getElementById("active-checkpoint").textContent = label;
+    const inferEl = document.getElementById("active-infer");
+    if (inferEl) {
+      const backend = data.infer_backend || "?";
+      const path = data.infer_path ? ` (${data.infer_path.split(/[/\\]/).pop()})` : "";
+      inferEl.textContent = backend + path;
+    }
     const sel = document.getElementById("checkpoint-select");
     if (sel) {
       sel.innerHTML = "";

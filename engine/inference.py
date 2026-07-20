@@ -53,6 +53,7 @@ class ONNXRunner(InferenceRunner):
     def __init__(self, onnx_path: str, providers: Optional[List] = None):
         import onnxruntime as ort
 
+        self.onnx_path = onnx_path
         if providers is None:
             providers = ort_providers()
         opts = ort.SessionOptions()

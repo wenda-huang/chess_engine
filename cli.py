@@ -299,8 +299,14 @@ def cmd_export_onnx(args: argparse.Namespace) -> None:
 def cmd_serve(args: argparse.Namespace) -> None:
     import uvicorn
 
-    ckpt = args.checkpoint or "models/best_2.pt"
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    models_dir = os.path.join(project_root, "models")
+    ckpt = args.checkpoint or os.path.join(models_dir, "best_2.pt")
+    ckpt_base = os.path.splitext(ckpt)[0]
+    os.environ["CHESSAI_MODELS"] = models_dir
     os.environ["CHESSAI_CHECKPOINT"] = ckpt
+    os.environ["CHESSAI_INFER"] = "onnx-int8"
+    os.environ["CHESSAI_ONNX"] = ckpt_base + ".int8.onnx"
     uvicorn.run("server.app:app", host=args.host, port=args.port, reload=args.reload)
 
 
