@@ -1,107 +1,149 @@
 # AlphaZero-Style Chess Engine
 
-A from-scratch chess engine that learns the way AlphaZero / Lc0 do -- a
-policy + value neural network guided by PUCT Monte Carlo Tree Search. To reach a
-useful strength (~1500-2000 Elo) cheaply, it **bootstraps from Stockfish-labeled
-positions** (supervised learning), then **refines via self-play**.
+A from-scratch chess engine that learns like AlphaZero / Lc0: a policy + value
+ResNet guided by PUCT MCTS. It **bootstraps from Stockfish-labeled positions**
+(supervised learning), then **refines via arena-gated self-play** with supervised
+anchoring to avoid collapse.
 
-It ships with a web app offering three modes:
+![Demo](chess_engine_demo.gif)
 
-- **Play** - play the engine; choose to start as White or Black and pick a difficulty.
-- **Board Editor** - place pieces anywhere, then get an evaluation and suggested moves.
-- **Training** - launch and monitor labeling, supervised and self-play jobs live.
+**Deployed model:** `models/best_2.pt` (~1,680 Elo vs Stockfish skill 5 at 800 MCTS
+sims with opening book + Syzygy tablebases). Trained on **4M depth-16** Stockfish
+labels plus two self-play cycles (20×256 ResNet, ~32M params).
 
-Everything auto-detects the compute device (CUDA / Apple MPS / CPU), so the same
-code runs on a laptop CPU for iteration and scales to a cloud GPU for real training.
+## Web app
+
+Three modes:
+
+- **Play** — play as White or Black; difficulty uses 200 / 400 / 800 MCTS sims.
+- **Board Editor** — set up any position, get eval + top move suggestions.
+- **Training** — launch and monitor labeling, supervised, and self-play jobs.
+
+```bash
+python -m cli serve
+# open http://127.0.0.1:8000
+```
+
+The server loads `models/best_2.pt` by default and runs **ONNX int8** inference
+when `models/best_2.int8.onnx` is present (export once with the command below).
+Optional but recommended for full strength:
+
+```bash
+export OPENING_BOOK=books/opening.bin
+export SYZYGY_PATH=books/syzygy
+```
 
 ## Project layout
 
 ```
-engine/     encoding, network model, MCTS, player, config
-teacher/    Stockfish UCI wrapper (produces value + policy targets)
-data/       position generation, Stockfish labeling, dataset + replay buffer
-train/      supervised bootstrap, self-play loop, Elo evaluation, progress log
+engine/     encoding, ResNet, MCTS, inference (PyTorch + ONNX), books, config
+teacher/    Stockfish UCI wrapper (value + policy targets)
+data/       position generation, labeling, dataset + replay buffer
+train/      supervised bootstrap, arena-gated self-play, Elo evaluation
 server/     FastAPI backend + static web frontend
 cli.py      command-line entrypoint for the whole pipeline
 ```
 
 ## Setup
 
-1. Install Python dependencies (a virtual environment is recommended):
+1. Create a virtual environment and install dependencies:
 
    ```bash
    pip install -r requirements.txt
    ```
 
-2. Install Stockfish (the teacher engine) and make it discoverable:
+2. Install [Stockfish](https://stockfishchess.org/download/) and point the
+   project at it (needed for training and Elo evaluation, not for play-only):
 
-   - Download a binary from https://stockfishchess.org/download/ (or use a
-     package manager: `brew install stockfish`, `apt install stockfish`,
-     `choco install stockfish`).
-   - Either put it on your `PATH` (so `stockfish` works) or point the engine at
-     it explicitly:
+   ```bash
+   # macOS/Linux
+   export STOCKFISH_PATH=/full/path/to/stockfish
+   # Windows PowerShell
+   $env:STOCKFISH_PATH = "C:\path\to\stockfish.exe"
+   ```
 
-     ```bash
-     # macOS/Linux
-     export STOCKFISH_PATH=/full/path/to/stockfish
-     # Windows PowerShell
-     $env:STOCKFISH_PATH = "C:\path\to\stockfish.exe"
-     ```
+3. **Model weights** are not bundled in this repo (129MB+ checkpoints). Place
+   your trained checkpoint in `models/` or export ONNX for inference:
 
-   Stockfish is only needed for **training/evaluation**. You can run the web app
-   and play against an (untrained) network without it.
+   ```bash
+   python -m cli export-onnx --checkpoint models/best_2.pt --int8
+   ```
 
-## Quick start (end-to-end)
+   On Linux/GPU boxes, `scripts/setup_linux.sh` bootstraps PyTorch, paths, and
+   ONNX export.
+
+## Quick start (full pipeline)
 
 ```bash
-# 1. Label positions with Stockfish (generates 2000 positions, labels them).
-python -m cli label --generate 2000 --depth 10
+export CHESSAI_DATA=data_d16          # labeled shard directory
 
-# 2. Supervised bootstrap on the labeled data -> models/supervised.pt
-python -m cli supervised --epochs 8
+# 1. Label positions (or use pre-built data_d16/)
+python -m cli label --generate 500000 --depth 16 --workers 8
 
-# 3. (Optional) Self-play refinement -> models/selfplay.pt and models/best.pt
-python -m cli selfplay --iterations 10 --games-per-iter 8 --sims 100
+# 2. Supervised bootstrap (large net: --blocks 20 --channels 256)
+python -m cli supervised --epochs 24 --blocks 20 --channels 256 --out supervised_big.pt
 
-# 4. Estimate strength vs skill-limited Stockfish
-python -m cli evaluate --checkpoint models/supervised.pt --games 20 --skill 3
+# 3. Self-play refinement (arena-gated; promotes to models/best.pt / best_2.pt)
+python -m cli selfplay --init models/supervised_big.pt --sims 400 --workers 24 \
+  --selfplay-device cpu --sup-fraction 0.5 --arena-every 3 --arena-games 300
 
-# 5. Launch the web app
-python -m cli serve --port 8000
-# open http://127.0.0.1:8000
+# 4. Measure strength (use enough sims — strength scales with search)
+python -m cli evaluate --checkpoint models/best_2.pt --games 50 --skill 5 \
+  --sims 800 --use-books --workers 1
+
+# 5. Health-check the value head
+python -m cli probe --checkpoint models/best_2.pt --n 4096
+
+# 6. Serve the web app
+python -m cli serve
 ```
 
-All of these steps can also be started and monitored from the **Training** tab
-in the web UI.
+Steps 1–4 can also be started from the **Training** tab in the web UI.
 
 ## How training works
 
-1. **Bootstrap (supervised).** `data/generate.py` produces a wide spread of
-   positions; `teacher/stockfish.py` labels each with a value
-   (`tanh(centipawns / 350)`, mates = +/-1) and a policy (softmax over the
-   MultiPV moves). `train/supervised.py` trains the network to match them.
-2. **Self-play refinement.** `train/selfplay.py` generates games with the
-   network + MCTS (Dirichlet noise at the root, a temperature schedule for
-   exploration). Training targets are the MCTS visit distribution (policy) and
-   the game outcome (value). You can optionally blend the Stockfish evaluation
-   into the value target with `--sf-value-weight` for extra stability.
-3. **Evaluate + promote.** `train/evaluate.py` plays matches against Stockfish at
-   a capped Skill Level and estimates Elo; the best checkpoint is saved to
-   `models/best.pt`.
+1. **Bootstrap (supervised).** Random and game-derived positions are labeled by
+   Stockfish (value: `tanh(cp/350)`, policy: MultiPV softmax). The network learns
+   to imitate the teacher.
+
+2. **Self-play refinement.** The **champion** generates games with MCTS (Dirichlet
+   root noise, temperature schedule, optional early resignation + Syzygy forced
+   endings). A **candidate** is trained on a replay buffer mixed 50/50 with
+   supervised data. Every N iterations an **arena** match (mirrored pairs, mixed
+   book openings) gates promotion — the deployed net only improves.
+
+3. **Evaluate.** `train/evaluate.py` estimates Elo vs skill-limited Stockfish.
+   Numbers are approximate; use them for **relative** progress between checkpoints.
+   Match deployment settings (`--sims`, `--use-books`) when comparing.
+
+## Inference backends
+
+Set `CHESSAI_INFER` to choose the runtime (auto-detects ONNX beside the checkpoint):
+
+| Backend | When to use |
+|---------|-------------|
+| `onnx-int8` | Default for serve/eval on CPU (fast) |
+| `onnx` | FP32 ONNX |
+| `torch` | Training, self-play workers |
+
+```bash
+python -m cli export-onnx --checkpoint models/best_2.pt --int8
+export CHESSAI_INFER=onnx-int8
+export CHESSAI_ONNX=models/best_2.int8.onnx
+```
 
 ## Scaling to a cloud GPU
 
-Nothing in the code is CPU-specific. On a GPU box, just install a CUDA build of
-PyTorch and increase the knobs:
+Install a CUDA build of PyTorch (`scripts/setup_linux.sh` handles RTX 50-series
+/sm_120). Train on GPU; run self-play workers on CPU (`--selfplay-device cpu`,
+many `--workers`) to avoid CUDA multiprocessing issues.
 
-- Network size in `engine/config.py` (`ModelConfig.num_blocks`, `channels`).
-- More labeled positions and higher Stockfish `--depth`.
-- More self-play `--games-per-iter`, `--sims`, and `--iterations`.
-
-The device is picked automatically, or force it with `CHESSAI_DEVICE=cuda`.
+Increase network size (`--blocks`, `--channels`), label depth, self-play
+`--sims`, and `--games-per-iter` on larger boxes.
 
 ## Notes
 
-- Promotions in the web UI auto-queen for simplicity.
-- Elo numbers are approximate (anchored to rough Stockfish Skill-Level Elos); they
-  are most reliable as a *relative* progress signal between checkpoints.
+- Under-promotions are supported in the policy head; the web UI auto-queens for simplicity.
+- Elo estimates depend on sim count, books, and sample size — report them together.
+- Checkpoints can be tracked with Git LFS (see `.gitattributes`); the demo GIF is
+  in-repo; full `.pt` weights are usually kept out of git.
