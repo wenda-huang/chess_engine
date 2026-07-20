@@ -36,7 +36,7 @@ app = FastAPI(title="AlphaZero Chess Engine")
 config = Config()
 config.ensure_dirs()
 
-DIFFICULTY_SIMS = {"easy": 30, "medium": 80, "hard": 200}
+DIFFICULTY_SIMS = {"easy": 200, "medium": 400, "hard": 800}
 
 
 class EngineHolder:
@@ -159,7 +159,7 @@ def legal_moves(fen: str) -> dict:
 def _engine_move(board: chess.Board, difficulty: str) -> Optional[str]:
     if board.is_game_over(claim_draw=True):
         return None
-    sims = DIFFICULTY_SIMS.get(difficulty, 80)
+    sims = DIFFICULTY_SIMS.get(difficulty, 400)
     move, _ = engine_holder.player.play_move(board, simulations=sims)
     board.push(move)
     return move.uci()
