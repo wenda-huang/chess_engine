@@ -299,7 +299,8 @@ def cmd_export_onnx(args: argparse.Namespace) -> None:
 def cmd_serve(args: argparse.Namespace) -> None:
     import uvicorn
 
-    os.environ.setdefault("CHESSAI_CHECKPOINT", args.checkpoint or "")
+    ckpt = args.checkpoint or "models/best_2.pt"
+    os.environ["CHESSAI_CHECKPOINT"] = ckpt
     uvicorn.run("server.app:app", host=args.host, port=args.port, reload=args.reload)
 
 
@@ -431,13 +432,13 @@ def build_parser() -> argparse.ArgumentParser:
     pr.set_defaults(func=cmd_probe)
 
     ex = sub.add_parser("export-onnx", help="Export checkpoint to ONNX (optional int8 quant)")
-    ex.add_argument("--checkpoint", default="models/supervised_big.pt")
+    ex.add_argument("--checkpoint", default="models/best_2.pt")
     ex.add_argument("--out", default=None, help="Output .onnx path (default: beside checkpoint)")
     ex.add_argument("--int8", action="store_true", help="Also write dynamic int8 quantized model")
     ex.set_defaults(func=cmd_export_onnx)
 
     e = sub.add_parser("evaluate", help="Estimate Elo vs Stockfish")
-    e.add_argument("--checkpoint", default="models/best.pt")
+    e.add_argument("--checkpoint", default="models/best_2.pt")
     e.add_argument("--games", type=int, default=20)
     e.add_argument("--sims", type=int, default=80)
     e.add_argument("--skill", type=int, default=3)

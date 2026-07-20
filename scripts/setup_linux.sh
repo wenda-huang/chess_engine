@@ -100,16 +100,16 @@ check_optional() {
   fi
 }
 
-check_optional "models/supervised_big.pt" "trained model"
+check_optional "models/best_2.pt" "deployed model"
 check_optional "data_d16" "4M depth-16 training data"
 check_optional "books/opening.bin" "opening book"
 check_optional "books/syzygy" "syzygy tablebases"
-check_optional "models/supervised_big.int8.onnx" "ONNX int8 export"
+check_optional "models/best_2.int8.onnx" "ONNX int8 export"
 
 # --- 6. Export ONNX if checkpoint exists but ONNX does not ---
-if [[ -f models/supervised_big.pt && ! -f models/supervised_big.int8.onnx ]]; then
+if [[ -f models/best_2.pt && ! -f models/best_2.int8.onnx ]]; then
   echo "==> Exporting ONNX (one-time)..."
-  python -m cli export-onnx --checkpoint models/supervised_big.pt --int8
+  python -m cli export-onnx --checkpoint models/best_2.pt --int8
 fi
 
 # --- 7. Write env file for convenience ---
@@ -120,7 +120,8 @@ export STOCKFISH_PATH="$STOCKFISH"
 export CHESSAI_DATA="${CHESSAI_DATA:-$ROOT/data_d16}"
 export CHESSAI_DEVICE="${CHESSAI_DEVICE:-cuda}"
 export CHESSAI_INFER="${CHESSAI_INFER:-onnx-int8}"
-export CHESSAI_ONNX="${CHESSAI_ONNX:-$ROOT/models/supervised_big.int8.onnx}"
+export CHESSAI_CHECKPOINT="${CHESSAI_CHECKPOINT:-$ROOT/models/best_2.pt}"
+export CHESSAI_ONNX="${CHESSAI_ONNX:-$ROOT/models/best_2.int8.onnx}"
 export OPENING_BOOK="${OPENING_BOOK:-$ROOT/books/opening.bin}"
 export SYZYGY_PATH="${SYZYGY_PATH:-$ROOT/books/syzygy}"
 # Self-play uses many processes — pin BLAS/torch to 1 thread each.
@@ -133,7 +134,7 @@ EOF
 echo "==> Wrote $ENV_FILE"
 
 # --- 8. Quick smoke test ---
-if [[ -f models/supervised_big.pt ]]; then
+if [[ -f models/best_2.pt ]]; then
   echo "==> Smoke test: load checkpoint + 80-sim eval..."
   source "$ENV_FILE"
   python -c "
@@ -141,7 +142,7 @@ import chess
 from engine.config import Config
 from engine.player import EnginePlayer
 cfg = Config()
-p = EnginePlayer(config=cfg, checkpoint='models/supervised_big.pt')
+p = EnginePlayer(config=cfg, checkpoint='models/best_2.pt')
 m, _ = p.select_move(chess.Board(), simulations=80)
 print('best move:', m.uci())
 "
@@ -152,5 +153,5 @@ echo "Setup complete. Next steps:"
 echo "  cd $ROOT"
 echo "  source .venv/bin/activate"
 echo "  source .env.sh"
-echo "  python -m cli evaluate --checkpoint models/supervised_big.pt --games 4 --skill 5 --sims 120 --workers 4"
-echo "  python -m cli selfplay --init models/supervised_big.pt --workers 14 --selfplay-device cpu ..."
+echo "  python -m cli evaluate --checkpoint models/best_2.pt --games 4 --skill 5 --sims 120 --workers 4"
+echo "  python -m cli serve"

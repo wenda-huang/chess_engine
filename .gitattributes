@@ -1,0 +1,4 @@
+# Large model artifacts (use: git lfs install)
+models/best_2.pt filter=lfs diff=lfs merge=lfs -text
+models/best_2.onnx filter=lfs diff=lfs merge=lfs -text
+models/best_2.int8.onnx filter=lfs diff=lfs merge=lfs -text

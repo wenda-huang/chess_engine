@@ -6,10 +6,21 @@ __pycache__/
 venv/
 
 # Runtime artifacts
-models/
 data_store/
 logs/
-*.pt
 *.npz
 books/
 data_d16/
+
+# Checkpoints — ignore all except the deployed model (+ ONNX exports)
+models/*
+!models/best_2.pt
+!models/best_2.onnx
+!models/best_2.int8.onnx
+
+*.pt
+!models/best_2.pt
+
+*.onnx
+!models/best_2.onnx
+!models/best_2.int8.onnx
