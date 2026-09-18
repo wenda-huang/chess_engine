@@ -21,11 +21,15 @@
 
 .PARAMETER SkipStockfish
   Do not download Stockfish (set STOCKFISH_PATH yourself).
+
+.PARAMETER SkipLc0
+  Do not download lc0 + a network into lc0\ (needed only for --teacher lc0 labeling).
 #>
 [CmdletBinding()]
 param(
   [string]$IndexUrl = "https://rocm.nightlies.amd.com/v2/gfx120X-all/",
-  [switch]$SkipStockfish
+  [switch]$SkipStockfish,
+  [switch]$SkipLc0
 )
 
 $ErrorActionPreference = "Stop"
@@ -117,6 +121,34 @@ if (-not $stockfish -and -not $SkipStockfish) {
 if ($stockfish) { Write-Host "==> Stockfish: $stockfish" }
 else { Write-Warning "Stockfish not set up; needed for labeling and Elo evaluation." }
 
+# --- 6b. lc0 (GPU teacher for labeling; DirectML build runs on the AMD GPU) ---
+$lc0Dir = Join-Path $Root "lc0"
+$lc0Exe = Join-Path $lc0Dir "lc0.exe"
+$lc0Net = Join-Path $lc0Dir "net.pb.gz"
+if (-not $SkipLc0) {
+  try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    New-Item -ItemType Directory -Force $lc0Dir | Out-Null
+    if (-not (Test-Path $lc0Exe)) {
+      Write-Host "==> Downloading lc0 (DirectML build)..."
+      $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/LeelaChessZero/lc0/releases/latest" -Headers @{ "User-Agent" = "chess-setup" }
+      $asset = $rel.assets | Where-Object { $_.name -match "windows-onnx-dml\.zip$" } | Select-Object -First 1
+      if (-not $asset) { throw "no windows-onnx-dml asset in release $($rel.tag_name)" }
+      $zip = Join-Path $env:TEMP $asset.name
+      Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip -UseBasicParsing
+      Expand-Archive -Path $zip -DestinationPath $lc0Dir -Force
+    }
+    if (-not (Test-Path $lc0Net)) {
+      # Distilled 256x10 net: strong, and ~2x faster than 512x15 on DirectML (see README).
+      Write-Host "==> Downloading lc0 network (37 MB)..."
+      Invoke-WebRequest -Uri "https://storage.lczero.org/files/networks-contrib/t1-256x10-distilled-swa-2432500.pb.gz" -OutFile $lc0Net -UseBasicParsing
+    }
+    Write-Host "==> lc0: $lc0Exe"
+  } catch {
+    Write-Warning "lc0 setup failed ($_). Labeling with --teacher lc0 will not work until it is installed."
+  }
+}
+
 # --- 7. GPU sanity check ---
 Write-Host "==> Verifying GPU..."
 $check = @'
@@ -148,6 +180,7 @@ $lines = @(
   "# Dot-source before running:  . .\.env.ps1",
   "`$env:CHESSAI_DEVICE = 'cuda'   # ROCm torch exposes the AMD GPU as 'cuda'",
   "`$env:CHESSAI_DATA = '$Root\data_d16'",
+  "`$env:LC0_PATH = '$lc0Exe'; `$env:LC0_WEIGHTS = '$lc0Net'",
   "`$env:CHESSAI_COMPILE = '0'     # torch.compile/inductor is unreliable on Windows ROCm",
   "`$env:OPENBLAS_NUM_THREADS = '1'; `$env:OMP_NUM_THREADS = '1'; `$env:MKL_NUM_THREADS = '1'"
 )

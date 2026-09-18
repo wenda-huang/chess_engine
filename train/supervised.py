@@ -217,9 +217,11 @@ def train_supervised(
             best_val = val_total
             save_checkpoint(out_path, model, meta={"epoch": epoch, "val_loss": val_total})
 
-    # Always save the final model too (in case val split was tiny).
-    save_checkpoint(out_path, model, meta={"epoch": epochs - 1, "final": True, "val_loss": best_val})
-    progress.log({"event": "done", "mode": "supervised", "checkpoint": out_path})
+    # Keep the last-epoch weights separately; ``out_path`` holds the best-validation epoch.
+    final_path = os.path.splitext(out_path)[0] + "_final.pt"
+    save_checkpoint(final_path, model, meta={"epoch": epochs - 1, "final": True})
+    progress.log({"event": "done", "mode": "supervised", "checkpoint": out_path,
+                  "final_checkpoint": final_path, "best_val_loss": round(best_val, 4)})
     return out_path
 
 

@@ -141,6 +141,32 @@ many `--workers`) to avoid CUDA multiprocessing issues.
 Increase network size (`--blocks`, `--channels`), label depth, self-play
 `--sims`, and `--games-per-iter` on larger boxes.
 
+## Windows + AMD GPU (RX 9070 XT)
+
+`scripts/setup_windows_amd.ps1` sets up ROCm PyTorch (exposed as `cuda`), Stockfish,
+and lc0. Training runs on the GPU as usual.
+
+**Labeling on the GPU with lc0.** Stockfish only runs on the CPU. As an alternative
+teacher, [Leela Chess Zero](https://lczero.org) runs a network on the GPU (DirectML):
+
+```powershell
+. .\.env.ps1
+python -m cli label --generate 170000 --teacher lc0 --nodes 200 --chain-len 6 `
+  --workers 3 --min-ply 4 --max-ply 60
+```
+
+- Policy targets are lc0's root **visit distribution**; value targets are the root
+  WDL expectation `P(win) - P(loss)`. These are not on the same scale as the
+  Stockfish `tanh(cp/350)` targets, so don't mix the two in one data directory.
+- `--chain-len K` labels K consecutive positions per start position by playing the
+  teacher's sampled move after each one, giving realistic game positions (not just
+  random-walk ones) at no extra search cost. `--generate N` is then the number of
+  *start* positions, yielding up to `N * K` samples.
+- Throughput is set by the GPU, not by worker count: 512x15 net ≈ 5.7k nodes/s,
+  distilled 256x10 + fp16 ≈ 13k nodes/s on a 9070 XT (about 40-55 positions/s at
+  100-200 nodes). More than ~3 workers doesn't help.
+- The 256x10 net is the default (`lc0/net.pb.gz`); set `LC0_WEIGHTS` to use another.
+
 ## Notes
 
 - Under-promotions are supported in the policy head; the web UI auto-queens for simplicity.
