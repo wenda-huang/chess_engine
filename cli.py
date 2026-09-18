@@ -104,6 +104,8 @@ def cmd_label(args: argparse.Namespace) -> None:
         nodes=args.nodes,
         minibatch=args.minibatch,
         chain_len=args.chain_len,
+        resume=not args.no_resume,
+        target_samples=args.target_samples,
         workers=args.workers,
         progress=logger,
     )
@@ -361,6 +363,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--chain-len", type=int, default=1,
         help="Label up to K consecutive positions per start position by playing the teacher's "
              "sampled move after each (realistic game positions; 1 = independent positions)",
+    )
+    la.add_argument(
+        "--no-resume", action="store_true",
+        help="Label every generated position and append new shards, instead of skipping the "
+             "first (already labeled) // chain-len ones. Use with a new --seed to extend a dataset.",
+    )
+    la.add_argument(
+        "--target-samples", type=int, default=None,
+        help="Stop once the data directory holds this many samples in total",
     )
     la.add_argument("--lc0-path", default=None, help="Path to lc0.exe (default: LC0_PATH or lc0/lc0.exe)")
     la.add_argument("--lc0-weights", default=None, help="lc0 network file (default: LC0_WEIGHTS or lc0/net.pb.gz)")

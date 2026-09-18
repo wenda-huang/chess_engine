@@ -103,6 +103,10 @@ def _label_task(fen: str) -> List[Sample]:
     return out
 
 
+class _TargetReached(Exception):
+    """Raised inside ``collect`` to stop labeling once ``target_samples`` exist."""
+
+
 def _fmt_duration(seconds: float) -> str:
     seconds = int(max(0, seconds))
     h, rem = divmod(seconds, 3600)
@@ -127,11 +131,18 @@ def label_positions(
     nodes: int = 400,
     minibatch: int = 32,
     chain_len: int = 1,
+    resume: bool = True,
+    target_samples: Optional[int] = None,
     workers: int = 1,
     heartbeat_seconds: float = 5.0,
     progress=None,
 ) -> List[str]:
     """Label ``fens`` and write shards. Returns the list of shard paths written.
+
+    ``resume`` skips the first ``already_labeled // chain_len`` start positions, which
+    is only meaningful when re-running the *same* position list; pass ``resume=False``
+    to append shards for a fresh list (e.g. a new seed). ``target_samples`` stops once
+    the directory holds that many samples in total (existing shards included).
 
     ``workers`` > 1 runs that many teacher processes in parallel. ``fens`` are
     start positions; with ``chain_len`` > 1 each yields up to that many samples.
@@ -141,11 +152,13 @@ def label_positions(
     config.ensure_dirs()
     all_fens = list(fens)
     chain_len = max(1, chain_len)
-    total = len(all_fens) * chain_len  # upper bound on samples (chains can end early)
-
-    # Resume: skip start positions already covered by existing shards.
     already = count_labeled(config.data_dir)
-    todo = all_fens[already // chain_len:]
+    # Upper bound on samples (chains can end early).
+    total = target_samples or len(all_fens) * chain_len
+    # Resume: skip start positions already covered by existing shards.
+    todo = all_fens[already // chain_len:] if resume else all_fens
+    if target_samples and already >= target_samples:
+        todo = []
     start_shard = len(existing_shards(config.data_dir))
     written: List[str] = []
 
@@ -201,19 +214,24 @@ def label_positions(
             done += 1
             if len(buf_planes) >= shard_size:
                 flush()
+        if target_samples and already + done >= target_samples:
+            raise _TargetReached
 
         now = time.time()
         if progress and (now - last_beat) >= heartbeat_seconds:
             elapsed = now - start_time
             rate = done / elapsed if elapsed > 0 else 0.0
-            remaining = max(len(todo) * chain_len - done, 0)
+            budget = len(todo) * chain_len
+            if target_samples:
+                budget = min(budget, target_samples - already)
+            remaining = max(budget - done, 0)
             eta = remaining / rate if rate > 0 else 0.0
             progress({
                 "event": "label",
                 "done": already + done,
                 "total": total,
                 "session_done": done,
-                "session_total": len(todo) * chain_len,
+                "session_total": min(len(todo) * chain_len, (target_samples - already) if target_samples else 1 << 60),
                 "rate_pos_per_sec": round(rate, 2),
                 "elapsed": _fmt_duration(elapsed),
                 "eta": _fmt_duration(eta),
@@ -258,13 +276,18 @@ def label_positions(
 
     if workers and workers > 1:
         with Pool(processes=workers, initializer=_init_worker, initargs=init_args) as pool:
-            for result in pool.imap_unordered(_label_task, todo, chunksize=2):
-                collect(result)
+            try:
+                for result in pool.imap_unordered(_label_task, todo, chunksize=2):
+                    collect(result)
+            except _TargetReached:
+                pass  # leaving the with-block terminates the workers
     else:
         _init_worker(*init_args)
         try:
             for fen in todo:
                 collect(_label_task(fen))
+        except _TargetReached:
+            pass
         finally:
             _WORKER["teacher"].close()
 
