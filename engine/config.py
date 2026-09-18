@@ -54,6 +54,13 @@ class Config:
         default_factory=lambda: os.environ.get("STOCKFISH_PATH", "stockfish")
     )
 
+    # Leela Chess Zero (GPU teacher for labeling). Override with LC0_PATH / LC0_WEIGHTS /
+    # LC0_BACKEND. "onnx-dml" runs on any DirectX 12 GPU (incl. AMD on Windows).
+    lc0_path: str = field(default_factory=lambda: os.environ.get("LC0_PATH", "lc0/lc0.exe"))
+    lc0_weights: str = field(default_factory=lambda: os.environ.get("LC0_WEIGHTS", "lc0/net.pb.gz"))
+    lc0_backend: str = field(default_factory=lambda: os.environ.get("LC0_BACKEND", "onnx-dml"))
+    lc0_backend_opts: str = field(default_factory=lambda: os.environ.get("LC0_BACKEND_OPTS", "fp16=true"))
+
     # Optional Polyglot opening book (.bin) and Syzygy endgame tablebase directory.
     # Used only for actual play/analysis, not training. Empty = disabled.
     opening_book_path: str = field(

@@ -11,7 +11,14 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from typing import List
+
+# Labeling never touches the training device, and probing it initializes the GPU
+# runtime (ROCm's busy-waiting threads pin ~2 cores per process, in every label
+# worker). Must be set before engine.config is imported, which probes on import.
+if sys.argv[1:2] in (["label"], ["generate"]):
+    os.environ.setdefault("CHESSAI_DEVICE", "cpu")
 
 from engine.config import Config
 
@@ -35,6 +42,14 @@ def cmd_label(args: argparse.Namespace) -> None:
     from train.progress import ProgressLogger
 
     config = Config()
+    if args.lc0_path:
+        config.lc0_path = args.lc0_path
+    if args.lc0_weights:
+        config.lc0_weights = args.lc0_weights
+    if args.lc0_backend:
+        config.lc0_backend = args.lc0_backend
+    if args.lc0_backend_opts is not None:
+        config.lc0_backend_opts = args.lc0_backend_opts
     config.ensure_dirs()
     # Create the log file up front so the UI has something to stream immediately.
     logger = ProgressLogger(_os.path.join(config.logs_dir, "label.jsonl"))
@@ -59,7 +74,10 @@ def cmd_label(args: argparse.Namespace) -> None:
                 )
                 gen_state["last"] = now
 
-        fens = generate_positions(args.generate, seed=args.seed, progress=_gen_progress)
+        fens = generate_positions(
+            args.generate, min_ply=args.min_ply, max_ply=args.max_ply,
+            seed=args.seed, progress=_gen_progress,
+        )
         logger.log(
             {
                 "event": "generate",
@@ -82,10 +100,14 @@ def cmd_label(args: argparse.Namespace) -> None:
         movetime=args.movetime,
         multipv=args.multipv,
         threads=args.threads,
+        teacher=args.teacher,
+        nodes=args.nodes,
+        minibatch=args.minibatch,
+        chain_len=args.chain_len,
         workers=args.workers,
         progress=logger,
     )
-    print(f"Labeled {len(fens)} positions into {len(shards)} new shard(s).")
+    print(f"Labeled from {len(fens)} start positions into {len(shards)} new shard(s).")
 
 
 def cmd_supervised(args: argparse.Namespace) -> None:
@@ -321,7 +343,30 @@ def build_parser() -> argparse.ArgumentParser:
     g.set_defaults(func=cmd_generate)
 
     la = sub.add_parser("label", help="Label positions with Stockfish")
-    la.add_argument("--generate", type=int, default=0, help="Generate N positions then label")
+    la.add_argument(
+        "--generate", type=int, default=0,
+        help="Generate N start positions then label (N * --chain-len samples in chain mode)",
+    )
+    la.add_argument("--min-ply", type=int, default=8, help="Earliest ply for generated positions")
+    la.add_argument("--max-ply", type=int, default=120, help="Latest ply for generated positions")
+    la.add_argument(
+        "--teacher", choices=["stockfish", "lc0"], default="stockfish",
+        help="stockfish: CPU, depth-limited. lc0: GPU network search, node-limited",
+    )
+    la.add_argument("--nodes", type=int, default=400, help="lc0 search nodes per position")
+    la.add_argument("--minibatch", type=int, default=32, help="lc0 NN minibatch size")
+    la.add_argument(
+        "--chain-len", type=int, default=1,
+        help="Label up to K consecutive positions per start position by playing the teacher's "
+             "sampled move after each (realistic game positions; 1 = independent positions)",
+    )
+    la.add_argument("--lc0-path", default=None, help="Path to lc0.exe (default: LC0_PATH or lc0/lc0.exe)")
+    la.add_argument("--lc0-weights", default=None, help="lc0 network file (default: LC0_WEIGHTS or lc0/net.pb.gz)")
+    la.add_argument("--lc0-backend", default=None, help="lc0 backend (default: onnx-dml)")
+    la.add_argument(
+        "--lc0-backend-opts", default=None,
+        help="lc0 --backend-opts string (default: fp16=true; pass '' to disable)",
+    )
     la.add_argument("--fens", default=None, help="Path to a file of FENs")
     la.add_argument("--shard-size", type=int, default=2000)
     la.add_argument("--depth", type=int, default=12)

@@ -24,3 +24,7 @@ models/*
 *.onnx
 !models/best_2.onnx
 !models/best_2.int8.onnx
+stockfish/
+.env.ps1
+lc0/
+data_improved/

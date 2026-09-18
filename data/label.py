@@ -8,11 +8,18 @@ with elapsed time, throughput and ETA so you can see it is actually working.
 Resumability: shards accumulate, and on restart with the *same* generated FEN
 set (same ``--generate N --seed S``) already-labeled positions are skipped, so a
 long run that is interrupted can be continued.
+
+Teachers: Stockfish (CPU, depth-limited) or lc0 (GPU, node-limited). With
+``chain_len > 1`` each start position is followed by the teacher's own sampled
+moves, yielding up to ``chain_len`` consecutive labeled positions per task. That
+gives realistic game positions (not just random-walk ones) at no extra search
+cost, since the search that labels a position also picks the move that leaves it.
 """
 from __future__ import annotations
 
 import glob
 import os
+import random
 import time
 from multiprocessing import Pool
 from typing import Iterable, List, Optional, Tuple
@@ -21,8 +28,8 @@ import chess
 import numpy as np
 
 from engine.config import Config
-from engine.encoding import board_to_planes
-from teacher.stockfish import StockfishTeacher
+from engine.encoding import board_to_planes, move_to_index
+from teacher import make_teacher
 
 SHARD_PREFIX = "labels_"
 
@@ -55,23 +62,45 @@ def count_labeled(data_dir: str) -> int:
     return total
 
 
-def _init_worker(path, depth, movetime, multipv, threads, hash_mb):
-    _WORKER["teacher"] = StockfishTeacher(
-        path, depth=depth, movetime=movetime, multipv=multipv,
-        threads=threads, hash_mb=hash_mb,
-    )
+# A chain stops early once the teacher sees a decided position (|value| above this).
+DECIDED_VALUE = 0.98
+
+Sample = Tuple[np.ndarray, float, List[int], List[float]]
 
 
-def _label_one(fen: str) -> Tuple[np.ndarray, float, List[int], List[float]]:
-    teacher: StockfishTeacher = _WORKER["teacher"]
+def _init_worker(config, teacher_kind, chain_len, teacher_opts):
+    _WORKER["teacher"] = make_teacher(teacher_kind, config, **teacher_opts)
+    _WORKER["chain_len"] = chain_len
+    _WORKER["rng"] = random.Random(os.getpid() ^ int(time.time() * 1000))
+
+
+def _label_task(fen: str) -> List[Sample]:
+    """Label ``fen`` and, in chain mode, the positions that follow it."""
+    teacher = _WORKER["teacher"]
+    chain_len: int = _WORKER["chain_len"]
+    rng: random.Random = _WORKER["rng"]
     board = chess.Board(fen)
-    label = teacher.label(board)
-    return (
-        board_to_planes(board),
-        float(label["value"]),
-        list(label["policy_indices"]),
-        list(label["policy_probs"]),
-    )
+    out: List[Sample] = []
+    for step in range(chain_len):
+        if board.is_game_over():
+            break
+        label = teacher.label(board)
+        if not label["policy_indices"]:
+            break
+        value = float(label["value"])
+        out.append((
+            board_to_planes(board), value,
+            list(label["policy_indices"]), list(label["policy_probs"]),
+        ))
+        if step == chain_len - 1 or abs(value) > DECIDED_VALUE:
+            break
+        by_index = {move_to_index(m): m for m in board.legal_moves}
+        choices = [(i, p) for i, p in zip(label["policy_indices"], label["policy_probs"]) if i in by_index]
+        if not choices:
+            break
+        idx = rng.choices([i for i, _ in choices], weights=[p for _, p in choices])[0]
+        board.push(by_index[idx])
+    return out
 
 
 def _fmt_duration(seconds: float) -> str:
@@ -94,23 +123,29 @@ def label_positions(
     multipv: int = 4,
     threads: int = 1,
     hash_mb: int = 128,
+    teacher: str = "stockfish",
+    nodes: int = 400,
+    minibatch: int = 32,
+    chain_len: int = 1,
     workers: int = 1,
     heartbeat_seconds: float = 5.0,
     progress=None,
 ) -> List[str]:
     """Label ``fens`` and write shards. Returns the list of shard paths written.
 
-    ``workers`` > 1 runs that many Stockfish worker processes in parallel.
+    ``workers`` > 1 runs that many teacher processes in parallel. ``fens`` are
+    start positions; with ``chain_len`` > 1 each yields up to that many samples.
     ``progress`` is an optional callable(dict) for streaming status updates.
     """
     config = config or Config()
     config.ensure_dirs()
     all_fens = list(fens)
-    total = len(all_fens)
+    chain_len = max(1, chain_len)
+    total = len(all_fens) * chain_len  # upper bound on samples (chains can end early)
 
-    # Resume: skip positions already covered by existing shards.
+    # Resume: skip start positions already covered by existing shards.
     already = count_labeled(config.data_dir)
-    todo = all_fens[already:]
+    todo = all_fens[already // chain_len:]
     start_shard = len(existing_shards(config.data_dir))
     written: List[str] = []
 
@@ -155,31 +190,30 @@ def label_positions(
     last_beat = start_time
     done = 0
 
-    def collect(result) -> None:
+    def collect(results: List[Sample]) -> None:
         nonlocal done, last_beat
-        planes, value, idxs, probs = result
-        buf_planes.append(planes)
-        buf_values.append(value)
-        buf_idx.extend(idxs)
-        buf_prob.extend(probs)
-        buf_len.append(len(idxs))
-        done += 1
-
-        if len(buf_planes) >= shard_size:
-            flush()
+        for planes, value, idxs, probs in results:
+            buf_planes.append(planes)
+            buf_values.append(value)
+            buf_idx.extend(idxs)
+            buf_prob.extend(probs)
+            buf_len.append(len(idxs))
+            done += 1
+            if len(buf_planes) >= shard_size:
+                flush()
 
         now = time.time()
         if progress and (now - last_beat) >= heartbeat_seconds:
             elapsed = now - start_time
             rate = done / elapsed if elapsed > 0 else 0.0
-            remaining = len(todo) - done
+            remaining = max(len(todo) * chain_len - done, 0)
             eta = remaining / rate if rate > 0 else 0.0
             progress({
                 "event": "label",
                 "done": already + done,
                 "total": total,
                 "session_done": done,
-                "session_total": len(todo),
+                "session_total": len(todo) * chain_len,
                 "rate_pos_per_sec": round(rate, 2),
                 "elapsed": _fmt_duration(elapsed),
                 "eta": _fmt_duration(eta),
@@ -189,18 +223,20 @@ def label_positions(
 
     # Preflight: make sure Stockfish actually launches before spawning a pool of
     # workers (a failing worker initializer would otherwise hang silently).
+    teacher_opts = dict(
+        depth=depth, movetime=movetime, multipv=multipv, threads=threads,
+        hash_mb=hash_mb, nodes=nodes, minibatch=minibatch,
+    )
     try:
-        probe = StockfishTeacher(
-            config.stockfish_path, depth=depth, movetime=movetime,
-            multipv=multipv, threads=threads, hash_mb=hash_mb,
-        )
+        probe = make_teacher(teacher, config, **teacher_opts)
         probe.close()
     except Exception as exc:  # noqa: BLE001
         if progress:
+            exe = config.lc0_path if teacher == "lc0" else config.stockfish_path
             progress({
-                "event": "error", "stage": "stockfish",
-                "message": f"Could not start Stockfish at '{config.stockfish_path}': {exc}",
-                "hint": "Set STOCKFISH_PATH to your Stockfish binary and restart the server.",
+                "event": "error", "stage": teacher,
+                "message": f"Could not start {teacher} ('{exe}'): {exc}",
+                "hint": "Set LC0_PATH/LC0_WEIGHTS or STOCKFISH_PATH and restart the server.",
             })
         raise
 
@@ -208,7 +244,8 @@ def label_positions(
         progress({
             "event": "start", "mode": "label", "total": total,
             "already_labeled": already, "to_label": len(todo),
-            "workers": workers, "depth": depth, "multipv": multipv,
+            "workers": workers, "teacher": teacher, "chain_len": chain_len,
+            "depth": depth, "nodes": nodes, "multipv": multipv,
         })
 
     if not todo:
@@ -217,17 +254,17 @@ def label_positions(
                       "shards": len(written), "note": "already complete"})
         return written
 
-    init_args = (config.stockfish_path, depth, movetime, multipv, threads, hash_mb)
+    init_args = (config, teacher, chain_len, teacher_opts)
 
     if workers and workers > 1:
         with Pool(processes=workers, initializer=_init_worker, initargs=init_args) as pool:
-            for result in pool.imap_unordered(_label_one, todo, chunksize=4):
+            for result in pool.imap_unordered(_label_task, todo, chunksize=2):
                 collect(result)
     else:
         _init_worker(*init_args)
         try:
             for fen in todo:
-                collect(_label_one(fen))
+                collect(_label_task(fen))
         finally:
             _WORKER["teacher"].close()
 
