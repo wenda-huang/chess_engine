@@ -50,69 +50,95 @@ def _raise_fd_limit() -> None:
         pass
 
 
-class _Shard:
-    """One shard: planes memory-mapped from disk; value/policy metadata in RAM."""
-
-    def __init__(self, planes_path: str, meta_path: str):
-        # mmap_mode='r' keeps planes on disk and pages them in on demand.
-        self.planes = np.load(planes_path, mmap_mode="r")
-        with np.load(meta_path) as meta:
-            self.values = meta["values"]
-            self.pol_idx = meta["pol_idx"]
-            self.pol_prob = meta["pol_prob"]
-            pol_len = meta["pol_len"]
-        # Precompute the start offset of each sample's sparse policy.
-        self.offsets = np.zeros(len(pol_len) + 1, dtype=np.int64)
-        np.cumsum(pol_len, out=self.offsets[1:])
-        self.n = int(self.planes.shape[0])
-
-    def sample(self, i: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
-        start, end = int(self.offsets[i]), int(self.offsets[i + 1])
-        planes = np.asarray(self.planes[i], dtype=np.float32)
-        return planes, self.pol_idx[start:end], self.pol_prob[start:end], float(self.values[i])
-
-
 class StockfishDataset(Dataset):
-    """Lazy, memory-mapped dataset over Stockfish-labeled shards.
+    """Lazy, memory-mapped dataset over labeled shards (Stockfish or lc0 teacher).
 
-    Only a small per-shard metadata footprint (values + sparse policy) is held in
-    RAM; the large planes tensors are memory-mapped and paged in on access, so the
-    corpus can be far larger than available memory.
+    Only per-sample metadata (values + sparse policy, ~100 bytes/sample) is held in
+    RAM as flat numpy arrays; the large planes tensors stay memory-mapped and are
+    paged in on access, so the corpus can be far larger than available memory.
+
+    ``ds[i]`` returns one dense ``(planes, policy, value)`` sample. ``batch(idx)``
+    is the fast path for training: it gathers many samples with vectorized numpy and
+    returns the policy sparse (padded), so no per-sample dense vector is built.
     """
 
     def __init__(self, data_dir: str, limit: Optional[int] = None):
         _raise_fd_limit()
-        self.shards: List[_Shard] = []
-        # Global sample index -> (shard_id, local_index).
-        self.index: List[Tuple[int, int]] = []
+        self.planes: List[np.ndarray] = []  # one memmap per shard
+        counts: List[int] = []
+        values, pol_len, pol_idx, pol_prob = [], [], [], []
+        total = 0
 
         for meta_path in existing_shards(data_dir):
+            if limit and total >= limit:
+                break
             base = os.path.basename(meta_path).replace(".meta.npz", "")
-            shard_idx = int(base.replace("labels_", ""))
-            planes_path = _planes_path(data_dir, shard_idx)
+            planes_path = _planes_path(data_dir, int(base.replace("labels_", "")))
             if not os.path.exists(planes_path):
                 continue
-            shard = _Shard(planes_path, meta_path)
-            sid = len(self.shards)
-            self.shards.append(shard)
-            for li in range(shard.n):
-                self.index.append((sid, li))
-                if limit and len(self.index) >= limit:
-                    break
-            if limit and len(self.index) >= limit:
-                break
+            planes = np.load(planes_path, mmap_mode="r")
+            with np.load(meta_path) as meta:
+                v, ln = meta["values"], meta["pol_len"]
+                pi, pp = meta["pol_idx"], meta["pol_prob"]
+            n = int(planes.shape[0])
+            if limit and total + n > limit:  # keep the sparse policy in step with the cut
+                n = limit - total
+                v, ln = v[:n], ln[:n]
+                pi, pp = pi[: int(ln.sum())], pp[: int(ln.sum())]
+            self.planes.append(planes)
+            counts.append(n)
+            values.append(v)
+            pol_len.append(ln)
+            pol_idx.append(pi)
+            pol_prob.append(pp)
+            total += n
+
+        self.n = total
+        self.shard_start = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
+        self.values = np.concatenate(values).astype(np.float32) if values else np.zeros(0, np.float32)
+        lens = np.concatenate(pol_len).astype(np.int64) if pol_len else np.zeros(0, np.int64)
+        self.pol_off = np.concatenate([[0], np.cumsum(lens)]).astype(np.int64)
+        self.pol_idx = np.concatenate(pol_idx).astype(np.int64) if pol_idx else np.zeros(0, np.int64)
+        self.pol_prob = np.concatenate(pol_prob).astype(np.float32) if pol_prob else np.zeros(0, np.float32)
 
     def __len__(self) -> int:
-        return len(self.index)
+        return self.n
+
+    def _planes_for(self, idx: np.ndarray) -> np.ndarray:
+        """uint8 planes for ``idx`` (any order), gathered shard by shard."""
+        out = np.empty((len(idx),) + self.planes[0].shape[1:], dtype=np.uint8)
+        sid = np.searchsorted(self.shard_start, idx, side="right") - 1
+        for s in np.unique(sid):
+            rows = np.nonzero(sid == s)[0]
+            local = idx[rows] - self.shard_start[s]
+            order = np.argsort(local)  # sorted reads are friendlier to the mmap
+            out[rows[order]] = self.planes[s][local[order]]
+        return out
+
+    def batch(self, idx: np.ndarray):
+        """Return ``(planes uint8 [B,18,8,8], pol_idx int64 [B,K], pol_prob f32 [B,K], values f32 [B])``.
+
+        Policy rows are zero-padded to the longest in the batch (padding has prob 0).
+        """
+        idx = np.asarray(idx, dtype=np.int64)
+        starts = self.pol_off[idx]
+        lens = self.pol_off[idx + 1] - starts
+        k = max(int(lens.max()), 1)
+        cols = np.arange(k)[None, :]
+        mask = cols < lens[:, None]
+        pos = np.minimum(starts[:, None] + cols, max(len(self.pol_idx) - 1, 0))
+        pol_idx = np.where(mask, self.pol_idx[pos], 0)
+        pol_prob = np.where(mask, self.pol_prob[pos], 0.0).astype(np.float32)
+        return self._planes_for(idx), pol_idx, pol_prob, self.values[idx]
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        sid, li = self.index[idx]
-        planes, pol_idx, pol_prob, value = self.shards[sid].sample(li)
-        policy = _dense_from_sparse(pol_idx, pol_prob)
+        planes, pol_idx, pol_prob, values = self.batch(np.array([idx]))
+        n = int(self.pol_off[idx + 1] - self.pol_off[idx])
+        policy = _dense_from_sparse(pol_idx[0, :n], pol_prob[0, :n])
         return (
-            torch.from_numpy(planes),
+            torch.from_numpy(planes[0].astype(np.float32)),
             torch.from_numpy(policy),
-            torch.tensor(value, dtype=torch.float32),
+            torch.tensor(float(values[0]), dtype=torch.float32),
         )
 
 

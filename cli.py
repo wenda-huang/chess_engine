@@ -131,6 +131,8 @@ def cmd_supervised(args: argparse.Namespace) -> None:
         resume=args.resume,
         out_name=args.out,
         num_workers=args.workers,
+        amp=not args.no_amp,
+        cosine=not args.no_cosine,
     )
     print(f"Saved supervised checkpoint to {path}")
 
@@ -393,8 +395,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--channels", type=int, default=None, help="Conv channels (network width)")
     s.add_argument("--value-hidden", type=int, default=None, help="Value head hidden units")
     s.add_argument(
-        "--workers", type=int, default=0, help="DataLoader worker processes (use on GPU, e.g. 8)"
+        "--workers", type=int, default=0, help="(unused; batches are assembled on a background thread)"
     )
+    s.add_argument("--no-amp", action="store_true", help="Disable bf16 mixed precision on GPU")
+    s.add_argument("--no-cosine", action="store_true", help="Constant learning rate (no cosine decay)")
     s.set_defaults(func=cmd_supervised)
 
     sp = sub.add_parser("selfplay", help="Self-play refinement loop (arena-gated)")
