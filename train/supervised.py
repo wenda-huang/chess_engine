@@ -95,6 +95,8 @@ def train_supervised(
     amp: bool = True,
     cosine: bool = True,
     warmup_steps: int = 300,
+    ckpt_every: int = 1,
+    patience: int = 3,
 ) -> str:
     """Supervised training on labeled shards.
 
@@ -120,9 +122,11 @@ def train_supervised(
     n_train = len(train_idx)
 
     if resume and os.path.exists(resume):
-        model, _ = load_checkpoint(resume, device=device)
+        model, resume_meta = load_checkpoint(resume, device=device)
+        epoch_offset = int((resume_meta or {}).get("epoch", -1)) + 1  # cumulative epoch count
     else:
         model = build_model(config.model, device=device)
+        epoch_offset = 0
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     steps_per_epoch = math.ceil(n_train / batch_size)
@@ -149,6 +153,8 @@ def train_supervised(
 
     out_path = os.path.join(config.models_dir, out_name)
     best_val = float("inf")
+    bad_epochs = 0
+    last_epoch = 0
     step = 0
     rng = np.random.RandomState(1)
     t_start = time.time()
@@ -213,13 +219,27 @@ def train_supervised(
         )
 
         val_total = val_p + val_v
-        if val_total < best_val:
+        last_epoch = epoch
+        improved = val_total < best_val
+        if improved:
             best_val = val_total
-            save_checkpoint(out_path, model, meta={"epoch": epoch, "val_loss": val_total})
+            bad_epochs = 0
+            save_checkpoint(out_path, model, meta={"epoch": epoch_offset + epoch, "val_loss": val_total})
+
+        if ckpt_every and (epoch + 1) % ckpt_every == 0:
+            # Crash-recovery snapshot (weights only): resume with --resume <name>_ckpt.pt.
+            save_checkpoint(os.path.splitext(out_path)[0] + "_ckpt.pt", model,
+                            meta={"epoch": epoch_offset + epoch, "val_loss": val_total})
+
+        if not improved:
+            bad_epochs += 1
+            if patience and bad_epochs >= patience:
+                progress.log({"event": "early_stop", "epoch": epoch, "best_val_loss": round(best_val, 4)})
+                break
 
     # Keep the last-epoch weights separately; ``out_path`` holds the best-validation epoch.
     final_path = os.path.splitext(out_path)[0] + "_final.pt"
-    save_checkpoint(final_path, model, meta={"epoch": epochs - 1, "final": True})
+    save_checkpoint(final_path, model, meta={"epoch": epoch_offset + last_epoch, "final": True})
     progress.log({"event": "done", "mode": "supervised", "checkpoint": out_path,
                   "final_checkpoint": final_path, "best_val_loss": round(best_val, 4)})
     return out_path

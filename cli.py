@@ -135,6 +135,7 @@ def cmd_supervised(args: argparse.Namespace) -> None:
         num_workers=args.workers,
         amp=not args.no_amp,
         cosine=not args.no_cosine,
+        patience=args.patience,
     )
     print(f"Saved supervised checkpoint to {path}")
 
@@ -410,6 +411,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.add_argument("--no-amp", action="store_true", help="Disable bf16 mixed precision on GPU")
     s.add_argument("--no-cosine", action="store_true", help="Constant learning rate (no cosine decay)")
+    s.add_argument("--patience", type=int, default=3,
+                   help="Early stop after N epochs without val-loss improvement (0 disables)")
     s.set_defaults(func=cmd_supervised)
 
     sp = sub.add_parser("selfplay", help="Self-play refinement loop (arena-gated)")
