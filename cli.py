@@ -12,6 +12,9 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+
+# hipBLASLt can't run under HIP-graph capture (used by the GPU search); must be set before torch loads.
+os.environ.setdefault("TORCH_BLAS_PREFER_HIPBLASLT", "0")
 from typing import List
 
 # Labeling never touches the training device, and probing it initializes the GPU
@@ -141,9 +144,31 @@ def cmd_supervised(args: argparse.Namespace) -> None:
 
 
 def cmd_selfplay(args: argparse.Namespace) -> None:
-    from train.train_loop import train_selfplay
-
     config = Config()
+    engine = args.engine if args.engine != "auto" else ("gpu" if config.device == "cuda" else "cpu")
+    if engine == "gpu":
+        from train.gpu_loop import train_selfplay_gpu
+
+        path = train_selfplay_gpu(
+            config=config, iterations=args.iterations, games_per_iter=args.games_per_iter, slots=args.slots,
+            sims=args.sims, train_steps=args.train_steps, batch_size=args.batch_size, lr=args.lr,
+            buffer_capacity=args.buffer_capacity, init_checkpoint=args.init, out_name=args.out,
+            best_name=args.best_out, temperature_moves=args.temperature_moves,
+            sup_fraction=args.sup_fraction, anchor_size=args.anchor_size,
+            resign=not args.no_resign, resign_threshold=args.resign_threshold,
+            resign_streak=args.resign_streak, complete_fraction=args.complete_fraction,
+            arena_every=args.arena_every, arena_games=args.arena_games, arena_sims=args.arena_sims,
+            arena_book_fraction=args.arena_book_fraction, arena_opening_min=args.arena_opening_min,
+            arena_opening_max=args.arena_opening_max, arena_temp_moves=args.arena_temp_moves,
+            gate_threshold=args.gate_threshold, gate_min_games=args.gate_min_games,
+            gate_require_significance=not args.no_gate_significance,
+            search_amp=not args.no_search_amp, start_iter=args.start_iter,
+        )
+        print(f"Saved self-play checkpoint to {path}", flush=True)
+        sys.stdout.flush()
+        os._exit(0)
+
+    from train.train_loop import train_selfplay
     path = train_selfplay(
         config=config,
         iterations=args.iterations,
@@ -498,6 +523,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--eval-skill", type=int, default=5, help="Stockfish skill for in-loop eval")
     sp.add_argument("--eval-sims", type=int, default=None,
                     help="MCTS sims for in-loop eval (default: same as --sims)")
+    sp.add_argument("--engine", choices=["auto", "gpu", "cpu"], default="auto",
+                    help="gpu: batched GPU search/self-play/arena (default on CUDA/ROCm); cpu: worker processes")
+    sp.add_argument("--slots", type=int, default=256,
+                    help="(gpu engine) games searched concurrently; --games-per-iter above this refills slots as games end")
+    sp.add_argument("--anchor-size", type=int, default=1_000_000,
+                    help="(gpu engine) labeled positions kept on the GPU for the supervised anchor")
+    sp.add_argument("--no-search-amp", action="store_true", help="(gpu engine) fp32 instead of bf16 search inference")
     sp.add_argument("--start-iter", type=int, default=0,
                     help="First iteration index (used when resuming after a crash)")
     sp.set_defaults(func=cmd_selfplay)
