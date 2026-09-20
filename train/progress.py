@@ -12,13 +12,13 @@ from typing import Optional
 
 
 class ProgressLogger:
-    def __init__(self, path: Optional[str] = None, echo: bool = True):
+    def __init__(self, path: Optional[str] = None, echo: bool = True, append: bool = False):
         self.path = path
         self.echo = echo
         if path:
             os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-            # Truncate at start of a job.
-            open(path, "w").close()
+            # Truncate at start of a job (unless resuming a crashed one).
+            open(path, "a" if append else "w").close()
 
     def log(self, payload: dict) -> None:
         payload = {"t": time.time(), **payload}

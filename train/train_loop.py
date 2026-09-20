@@ -331,10 +331,13 @@ def train_selfplay(
     eval_skill: int = 5,
     eval_sims: Optional[int] = None,
     progress: Optional[ProgressLogger] = None,
+    start_iter: int = 0,
 ) -> str:
     config = config or Config()
     config.ensure_dirs()
-    progress = progress or ProgressLogger(os.path.join(config.logs_dir, "selfplay.jsonl"))
+    progress = progress or ProgressLogger(
+        os.path.join(config.logs_dir, "selfplay.jsonl"), append=start_iter > 0
+    )
     device = config.device
     arena_sims = arena_sims or sims
     eval_sims = eval_sims or sims
@@ -432,6 +435,7 @@ def train_selfplay(
             "event": "start",
             "mode": "selfplay",
             "iterations": iterations,
+            "start_iter": start_iter,
             "games_per_iter": games_per_iter,
             "sims": sims,
             "device": device,
@@ -456,7 +460,7 @@ def train_selfplay(
     save_checkpoint(best_path, champion, meta={"iter": -1, "note": "init"})
 
     try:
-        for it in range(iterations):
+        for it in range(start_iter, iterations):
             # ---- 1. Generate self-play games from the CHAMPION ----
             champion.eval()
             if parallel:
@@ -597,6 +601,8 @@ def train_selfplay(
                 )
                 progress.log({"event": "champion_elo", "iter": it,
                               "estimated_elo": result["estimated_elo"]})
+
+            progress.log({"event": "iter_done", "iter": it})
     finally:
         if teacher is not None:
             teacher.close()

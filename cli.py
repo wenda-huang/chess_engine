@@ -181,8 +181,13 @@ def cmd_selfplay(args: argparse.Namespace) -> None:
         eval_games=args.eval_games,
         eval_skill=args.eval_skill,
         eval_sims=args.eval_sims,
+        start_iter=args.start_iter,
     )
-    print(f"Saved self-play checkpoint to {path}")
+    print(f"Saved self-play checkpoint to {path}", flush=True)
+    # Hard-exit: interpreter teardown was observed to hang (busy process) after the run finished.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 def cmd_probe(args: argparse.Namespace) -> None:
@@ -493,6 +498,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--eval-skill", type=int, default=5, help="Stockfish skill for in-loop eval")
     sp.add_argument("--eval-sims", type=int, default=None,
                     help="MCTS sims for in-loop eval (default: same as --sims)")
+    sp.add_argument("--start-iter", type=int, default=0,
+                    help="First iteration index (used when resuming after a crash)")
     sp.set_defaults(func=cmd_selfplay)
 
     pr = sub.add_parser("probe", help="Check the value head for collapse (pred vs target)")
