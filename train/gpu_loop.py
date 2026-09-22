@@ -14,7 +14,6 @@ from typing import Optional
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 from data.dataset import StockfishDataset
 from engine.books import build_mixed_opening_pool, try_load_opening_book
@@ -24,7 +23,7 @@ from engine.gpuplay import GpuReplayBuffer, gpu_arena, gpu_selfplay
 from engine.model import build_model, load_checkpoint, save_checkpoint
 from train.progress import ProgressLogger
 from train.supervised import policy_loss
-from train.train_loop import _gate_promote
+from train.train_loop import _gate_promote, _wdl_loss
 
 
 class GpuAnchor:
@@ -177,9 +176,9 @@ def train_selfplay_gpu(
                     target_value = torch.cat([bv, sv])
                 else:
                     planes, target_policy, target_value = bp, bpi, bv
-                logits, value = candidate(planes)
+                logits, value, wdl_logits = candidate(planes, return_wdl=True)
                 p_loss = policy_loss(logits, target_policy)
-                v_loss = F.mse_loss(value, target_value)
+                v_loss = _wdl_loss(wdl_logits, target_value)
                 optimizer.zero_grad()
                 (p_loss + v_loss).backward()
                 optimizer.step()

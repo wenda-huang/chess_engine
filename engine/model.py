@@ -48,7 +48,15 @@ class ResidualBlock(nn.Module):
 
 
 class ChessNet(nn.Module):
-    """Input: (B, 18, 8, 8). Outputs: policy logits (B, POLICY_SIZE) and value (B,)."""
+    """Input: (B, 18, 8, 8). Outputs: policy logits (B, POLICY_SIZE) and value (B,).
+
+    The value head is WDL (win/draw/loss): it predicts a 3-way outcome distribution
+    (``wdl_logits``, class order [win, draw, loss], from the side-to-move's perspective)
+    instead of a single tanh scalar. The scalar ``value`` returned by default is derived
+    from it as ``P(win) - P(loss)`` so every existing caller (MCTS, inference, CLI play/eval)
+    keeps working unchanged against the same [-1, 1] scale; pass ``return_wdl=True`` to also
+    get the raw logits, needed to train against a real (win, draw, loss) target.
+    """
 
     def __init__(self, config: ModelConfig | None = None):
         super().__init__()
@@ -68,13 +76,15 @@ class ChessNet(nn.Module):
         self.policy_bn = nn.BatchNorm2d(32)
         self.policy_fc = nn.Linear(32 * 8 * 8, POLICY_SIZE)
 
-        # Value head.
+        # Value head (WDL: win / draw / loss logits).
         self.value_conv = nn.Conv2d(c, 8, 1, bias=False)
         self.value_bn = nn.BatchNorm2d(8)
         self.value_fc1 = nn.Linear(8 * 8 * 8, config.value_hidden)
-        self.value_fc2 = nn.Linear(config.value_hidden, 1)
+        self.value_fc2 = nn.Linear(config.value_hidden, 3)
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, x: torch.Tensor, return_wdl: bool = False
+    ) -> Tuple[torch.Tensor, torch.Tensor] | Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         x = self.stem(x)
         x = self.blocks(x)
 
@@ -85,8 +95,12 @@ class ChessNet(nn.Module):
         v = F.relu(self.value_bn(self.value_conv(x)))
         v = v.flatten(1)
         v = F.relu(self.value_fc1(v))
-        value = torch.tanh(self.value_fc2(v)).squeeze(-1)
+        wdl_logits = self.value_fc2(v)  # [B, 3] = (win, draw, loss)
+        wdl_probs = F.softmax(wdl_logits, dim=-1)
+        value = wdl_probs[:, 0] - wdl_probs[:, 2]
 
+        if return_wdl:
+            return policy_logits, value, wdl_logits
         return policy_logits, value
 
 
@@ -123,7 +137,21 @@ def load_checkpoint(
     # Load weights on the raw module first; compiling before load_state_dict
     # wraps keys as _orig_mod.* and breaks checkpoint loading.
     model = build_model(cfg, device=device, compile_model=False)
-    model.load_state_dict(ckpt["state_dict"])
+    try:
+        model.load_state_dict(ckpt["state_dict"])
+    except RuntimeError:
+        # Warm start from a pre-WDL checkpoint (single-scalar value head): keep the
+        # trunk + policy weights, which are shape-compatible, and let the resized
+        # value_fc2 (1 -> 3 outputs) stay freshly initialized for fine-tuning.
+        # (strict=False alone would still raise on a shape mismatch -- it only
+        # tolerates missing/extra *keys* -- so mismatched tensors are dropped by hand.)
+        own = model.state_dict()
+        src = ckpt["state_dict"]
+        filtered = {k: v for k, v in src.items() if k in own and own[k].shape == v.shape}
+        skipped = [k for k in src if k not in filtered]
+        model.load_state_dict(filtered, strict=False)
+        print(f"load_checkpoint({path}): partial load (WDL warm start), "
+              f"reinitialized: {skipped}")
     model.eval()
     if compile_model is None:
         compile_model = os.environ.get("CHESSAI_COMPILE", "").lower() in ("1", "true", "yes")
