@@ -163,10 +163,15 @@ def _gate_promote(
     if score < threshold:
         return False, f"below_threshold ({score:.3f} < {threshold})"
     if require_significance and n > 0:
-        # One-sided normal approx: H0 true score = 0.5 (even match).
-        se = 0.5 / (n ** 0.5)
-        z = (score - 0.5) / se
-        if z < 1.645:  # ~95% one-sided
+        # One-sided z-test of H0 "true score == threshold" (threshold=0.5 is a strict
+        # improvement bar; a lower threshold, e.g. ~0.43 for a -50 Elo margin a la Lc0's
+        # early gating, lets a candidate promote without having to prove it's better --
+        # only that it's not significantly worse than the margin). A game scores 1 / 0.5 / 0,
+        # so its variance under H0 is E[x^2] - threshold^2 = (W + 0.25 D) / n - threshold^2 --
+        # draws shrink it, which matters when about half the games are drawn.
+        var = max((wins + 0.25 * draws) / n - threshold ** 2, 1e-9)
+        z = (score - threshold) / (var / n) ** 0.5
+        if z < 1.645:  # 95% one-sided
             return False, f"not_significant (z={z:.2f}, need >=1.645)"
     return True, "promoted"
 

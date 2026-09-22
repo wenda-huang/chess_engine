@@ -6,6 +6,7 @@ played in one batched search over hundreds of concurrent games (see ``engine.gpu
 """
 from __future__ import annotations
 
+import math
 import os
 import random
 import time
@@ -64,6 +65,9 @@ def train_selfplay_gpu(
     train_steps: int = 200,
     batch_size: int = 256,
     lr: float = 1e-4,
+    lr_decay_from: int = 0,
+    lr_decay_iters: int = 0,
+    lr_min_fraction: float = 0.1,
     buffer_capacity: int = 300_000,
     init_checkpoint: Optional[str] = "models/supervised.pt",
     out_name: str = "selfplay.pt",
@@ -129,8 +133,20 @@ def train_selfplay_gpu(
     })
     save_checkpoint(best_path, champion, meta={"iter": start_iter - 1, "note": "init"})
 
+    def lr_at(it: int) -> float:
+        """Constant ``lr`` until ``lr_decay_from``, then cosine to ``lr * lr_min_fraction`` over
+        ``lr_decay_iters`` iterations (indexed by the global iteration, so restarts stay on schedule)."""
+        if lr_decay_iters <= 0 or it <= lr_decay_from:
+            return lr
+        frac = min(1.0, (it - lr_decay_from) / lr_decay_iters)
+        floor = lr * lr_min_fraction
+        return floor + 0.5 * (lr - floor) * (1 + math.cos(math.pi * frac))
+
     for it in range(start_iter, iterations):
         torch.manual_seed(1000 + it)
+        cur_lr = lr_at(it)
+        for group in optimizer.param_groups:
+            group["lr"] = cur_lr
         t0 = time.time()
 
         # ---- 1. self-play from the CHAMPION (all games concurrent on the GPU) -------------------
@@ -144,7 +160,7 @@ def train_selfplay_gpu(
             amp=search_amp, on_game=log_game,
             on_tick=lambda it=it: progress.log({"event": "heartbeat", "iter": it, "phase": "selfplay"}),
         )
-        progress.log({"event": "selfplay_done", "iter": it, "seconds": round(time.time() - t0),
+        progress.log({"event": "selfplay_done", "iter": it, "lr": round(cur_lr, 8), "seconds": round(time.time() - t0),
                       "buffer": len(buffer), **stats})
 
         # ---- 2. train the CANDIDATE (self-play + supervised anchor) ------------------------------
@@ -197,6 +213,9 @@ def train_selfplay_gpu(
                 champion.load_state_dict(candidate.state_dict())
                 champ_version += 1
                 save_checkpoint(best_path, champion, meta={"iter": it, "arena_score": score})
+                stem, ext = os.path.splitext(best_name)  # keep every champion for later comparison
+                save_checkpoint(os.path.join(config.models_dir, f"{stem}_it{it}{ext}"), champion,
+                                meta={"iter": it, "arena_score": score})
                 progress.log({"event": "promote", "champ_version": champ_version, **common})
             else:
                 candidate.load_state_dict(champion.state_dict())  # reject: revert the candidate

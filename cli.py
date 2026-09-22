@@ -152,6 +152,8 @@ def cmd_selfplay(args: argparse.Namespace) -> None:
         path = train_selfplay_gpu(
             config=config, iterations=args.iterations, games_per_iter=args.games_per_iter, slots=args.slots,
             sims=args.sims, train_steps=args.train_steps, batch_size=args.batch_size, lr=args.lr,
+            lr_decay_from=args.lr_decay_from, lr_decay_iters=args.lr_decay_iters,
+            lr_min_fraction=args.lr_min_fraction,
             buffer_capacity=args.buffer_capacity, init_checkpoint=args.init, out_name=args.out,
             best_name=args.best_out, temperature_moves=args.temperature_moves,
             sup_fraction=args.sup_fraction, anchor_size=args.anchor_size,
@@ -506,8 +508,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--arena-temp-moves", type=int, default=0,
                     help="Plies the arena temperature applies for (0 = none)")
     sp.add_argument(
-        "--gate-threshold", type=float, default=0.55,
-        help="Candidate must score >= this vs champion to be promoted",
+        "--gate-threshold", type=float, default=0.5,
+        help="Candidate must score >= this vs champion to be promoted (with the significance test, "
+             "0.5 means: promote when better at the 95%% one-sided level)",
     )
     sp.add_argument(
         "--gate-min-games", type=int, default=300,
@@ -525,6 +528,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="MCTS sims for in-loop eval (default: same as --sims)")
     sp.add_argument("--engine", choices=["auto", "gpu", "cpu"], default="auto",
                     help="gpu: batched GPU search/self-play/arena (default on CUDA/ROCm); cpu: worker processes")
+    sp.add_argument("--lr-decay-from", type=int, default=0,
+                    help="(gpu engine) iteration at which the learning rate starts decaying")
+    sp.add_argument("--lr-decay-iters", type=int, default=0,
+                    help="(gpu engine) cosine-decay the LR to lr*--lr-min-fraction over this many iterations (0 = constant)")
+    sp.add_argument("--lr-min-fraction", type=float, default=0.1)
     sp.add_argument("--slots", type=int, default=256,
                     help="(gpu engine) games searched concurrently; --games-per-iter above this refills slots as games end")
     sp.add_argument("--anchor-size", type=int, default=1_000_000,
