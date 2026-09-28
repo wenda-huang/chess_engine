@@ -11,6 +11,10 @@ anchoring to avoid collapse.
 sims with opening book + Syzygy tablebases). Trained on **4M depth-16** Stockfish
 labels plus two self-play cycles (20×256 ResNet, ~32M params).
 
+**Latest model:** `models/best_small.pt` (10×128 ResNet, win/draw/loss value head),
+~1,630 Elo vs Stockfish skill 3 at 800 sims after 200 iterations of fully GPU-resident
+self-play. See [Results](#results-best_small-10128).
+
 ## Web app
 
 Three modes:
@@ -36,10 +40,12 @@ export SYZYGY_PATH=books/syzygy
 ## Project layout
 
 ```
-engine/     encoding, ResNet, MCTS, inference (PyTorch + ONNX), books, config
+engine/     encoding, ResNet, MCTS, inference (PyTorch + ONNX), books, config;
+            gpuchess / gpumcts / gpuplay: batched move generation, MCTS, self-play and arena on the GPU
 teacher/    Stockfish UCI wrapper (value + policy targets)
 data/       position generation, labeling, dataset + replay buffer
-train/      supervised bootstrap, arena-gated self-play, Elo evaluation
+train/      supervised bootstrap, arena-gated self-play (CPU workers or gpu_loop), Elo evaluation
+scripts/    launchers (run_selfplay.ps1, run_distill_label.ps1), setup, tests
 server/     FastAPI backend + static web frontend
 cli.py      command-line entrypoint for the whole pipeline
 ```
@@ -166,6 +172,83 @@ python -m cli label --generate 170000 --teacher lc0 --nodes 200 --chain-len 6 `
   distilled 256x10 + fp16 ≈ 13k nodes/s on a 9070 XT (about 40-55 positions/s at
   100-200 nodes). More than ~3 workers doesn't help.
 - The 256x10 net is the default (`lc0/net.pb.gz`); set `LC0_WEIGHTS` to use another.
+- lc0 reuses its search tree along a chain, so chained positions label faster: at
+  400 nodes, ~35 positions/s with `--chain-len 3` vs ~23/s for independent positions.
+
+## GPU self-play (`--engine gpu`)
+
+Self-play, search and arena gating can run entirely on the GPU: `engine/gpuchess.py`
+generates legal moves for hundreds of boards at once, `engine/gpumcts.py` runs batched
+PUCT search (recorded once as a HIP/CUDA graph and replayed each simulation), and
+`train/gpu_loop.py` drives the champion/candidate loop with no worker processes.
+
+```powershell
+powershell -File scripts\run_selfplay.ps1 -Iterations 200 [-LrDecayFrom 200 -LrDecayIters 40]
+```
+
+The launcher restarts on crash or hang and resumes at the next unfinished iteration
+from the champion checkpoint (`models/best_small.pt`); every promoted champion is also
+kept as `models/best_small_it<N>.pt`. Progress goes to `logs/selfplay.jsonl`.
+
+- **Value head:** win/draw/loss logits (cross-entropy loss); the scalar value used by
+  search is `P(win) - P(loss)`. Older single-scalar checkpoints load with a freshly
+  initialized value head.
+- **Gating:** the launcher's default `-GateThreshold 0.43` promotes a candidate unless
+  it is significantly worse than about −50 Elo, as in early Lc0 gating. Use 0.5 to
+  require a proven improvement.
+- **ROCm on Windows:** set `TORCH_BLAS_PREFER_HIPBLASLT=0` in the environment *before*
+  Python starts (the launchers do this); hipBLASLt cannot run under graph capture.
+- `cli evaluate` still searches with the Python MCTS in worker processes, so it is
+  CPU-bound even when the network runs on the GPU. For checkpoint-vs-checkpoint
+  matches use `engine.gpuplay.gpu_arena`.
+
+## Distillation from lc0
+
+Self-play alone gains slowly at this network size, so the engine is also trained on
+lc0's analysis of positions from its *own* games:
+
+```powershell
+powershell -File scripts
+un_distill_label.ps1   # -Checkpoint modelsest_small_it197.pt
+powershell -File scripts
+un_distill_train.ps1   # -Init modelsest_small_it197.pt
+python scripts/arena.py models/distill_small.pt models/best_small_it197.pt --pairs 150 --sims 400
+```
+
+1. `scripts/selfplay_fens.py` plays GPU self-play (128 sims) and writes unique
+   positions to `data_distill/fens.txt` (1.3M positions, ~5 h on a 9070 XT).
+2. `cli label --teacher lc0 --nodes 400 --chain-len 3` labels each position plus
+   lc0's next two moves, stopping at 3.5M samples (~28 h). Both steps resume after a
+   restart.
+3. `cli supervised --resume <checkpoint>` fine-tunes the self-play net on those labels
+   (8 epochs, lr 5e-4 cosine, ~25 min); the WDL head is trained with the same
+   cross-entropy loss as in self-play.
+4. `scripts/arena.py` plays the result against the starting checkpoint on the GPU.
+
+Round 1 (from iteration 197): `distill_small.pt` beat it197 +93 =146 −61 (300 games,
+400 sims), **+37 Elo** (95% CI +9 to +66). Per GPU-hour (~33 h in all) that is about the
+same rate as recent self-play, so self-play then resumed from the distilled net with
+`data_distill` as its supervised anchor:
+
+```powershell
+powershell -File scripts
+un_selfplay.ps1 -Iterations 300 -DataDir data_distill -GateThreshold 0.5 -NoGateSignificance
+```
+
+## Results (`best_small`, 10×128)
+
+Estimated Elo vs Stockfish skill 3 (50 ms/move, taken as 1575), 150 games per point,
+torch inference:
+
+| Iteration | 80 | 101 | 110 | 131 | 140 | 161 | 197 |
+|---|---|---|---|---|---|---|---|
+| 80 sims | 1274 | 1287 | 1234 | 1345 | 1264 | 1312 | 1341 |
+| 800 sims | 1582 | 1608 | 1596 | 1619 | 1617 | 1665 | 1629 |
+
+- Search depth dominates: 800 sims is worth ~+300 Elo over 80 sims.
+- Each point is ±50–60 Elo. Direct matches (300 games, 400 sims) are tighter:
+  iteration 101 beat 80 by +64, 131 beat 80 by +99, and 197 beat 131 by +47.
+- Self-play gains ~0.5 Elo per iteration at this stage.
 
 ## Notes
 

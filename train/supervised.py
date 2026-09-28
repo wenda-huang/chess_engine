@@ -25,6 +25,27 @@ def policy_loss(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return -(target * logp).sum(dim=1).mean()
 
 
+def _value_to_wdl(value: torch.Tensor) -> torch.Tensor:
+    """Convert a scalar target in [-1, 1] (a game outcome, or a teacher's tanh(cp) eval)
+    into a soft (win, draw, loss) target for the WDL value head.
+
+    ``p_win = relu(v)``, ``p_loss = relu(-v)``, ``p_draw = 1 - |v|`` -- a linear split
+    between "draw" and the decisive outcome by eval magnitude. It's exact for self-play
+    game outcomes (v in {-1, 0, 1} maps to a pure one-hot) and a reasonable soft label
+    for continuous teacher evals (small |v| ~ balanced/drawish, |v| near 1 ~ decisive).
+    """
+    p_win = torch.relu(value)
+    p_loss = torch.relu(-value)
+    p_draw = 1 - value.abs()
+    return torch.stack([p_win, p_draw, p_loss], dim=-1)
+
+
+def _wdl_loss(wdl_logits: torch.Tensor, target_value: torch.Tensor) -> torch.Tensor:
+    """Cross-entropy of the WDL head against a soft (win, draw, loss) target."""
+    target = _value_to_wdl(target_value)
+    return -(target * F.log_softmax(wdl_logits, dim=-1)).sum(dim=-1).mean()
+
+
 class _Prefetcher:
     """Assemble batches on a background thread so the GPU never waits on numpy.
 
@@ -161,8 +182,8 @@ def train_supervised(
 
     def forward(planes):
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
-            logits, value = model(planes)
-        return logits.float(), value.float()
+            logits, _, wdl_logits = model(planes, return_wdl=True)
+        return logits.float(), wdl_logits.float()
 
     for epoch in range(epochs):
         model.train()
@@ -175,9 +196,9 @@ def train_supervised(
             for group in optimizer.param_groups:
                 group["lr"] = _lr_at(step, total_steps, lr, warmup_steps, cosine)
 
-            logits, value = forward(planes)
+            logits, wdl_logits = forward(planes)
             p_loss = policy_loss(logits, target_policy)
-            v_loss = F.mse_loss(value, target_value)
+            v_loss = _wdl_loss(wdl_logits, target_value)
             loss = p_loss + v_loss
 
             optimizer.zero_grad(set_to_none=True)
@@ -251,9 +272,9 @@ def _validate(model, dataset, val_idx, batch_size, device, forward):
     tot_p, tot_v, count = 0.0, 0.0, 0
     for batch in _Prefetcher(lambda: _batches(dataset, val_idx, batch_size)):
         planes, target_policy, target_value = _to_device(batch, device)
-        logits, value = forward(planes)
+        logits, wdl_logits = forward(planes)
         n = planes.size(0)
         tot_p += policy_loss(logits, target_policy).item() * n
-        tot_v += F.mse_loss(value, target_value).item() * n
+        tot_v += _wdl_loss(wdl_logits, target_value).item() * n
         count += n
     return tot_p / max(count, 1), tot_v / max(count, 1)

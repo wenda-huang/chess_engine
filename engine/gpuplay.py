@@ -110,8 +110,12 @@ def gpu_selfplay(
     amp: bool = False,
     on_game: Optional[Callable[[dict], None]] = None,
     on_tick: Optional[Callable[[], None]] = None,
+    on_moves: Optional[Callable[[List[int]], None]] = None,
 ) -> Dict[str, float]:
-    """Play ``n_games`` self-play games and append every position to ``buffer``."""
+    """Play ``n_games`` self-play games and append every position to ``buffer``.
+
+    ``on_moves`` (optional) receives each finished game's move codes (``gpuchess`` encoding).
+    """
     dev = buffer.device
     S = max(1, min(slots, n_games))
     A = MAX_MOVES
@@ -133,6 +137,7 @@ def gpu_selfplay(
     hpol = torch.zeros(S, max_moves + 1, A, dtype=torch.int16, device=dev)
     hprob = torch.zeros(S, max_moves + 1, A, dtype=torch.float16, device=dev)
     hstm = torch.zeros(S, max_moves + 1, dtype=torch.bool, device=dev)
+    hmove = torch.zeros(S, max_moves + 1, dtype=torch.int32, device=dev) if on_moves else None
     tidx = torch.arange(max_moves + 1, device=dev)[None, :]
 
     finished = 0
@@ -157,6 +162,9 @@ def gpu_selfplay(
             done_slots = over.nonzero().squeeze(1)
             results = wres[done_slots].tolist()
             lengths = ply[done_slots].tolist()
+            if on_moves is not None:
+                for slot, n in zip(done_slots.tolist(), lengths):
+                    on_moves(hmove[slot, :n].tolist())
             for r, n in zip(results, lengths):
                 finished += 1
                 stats["white" if r > 0 else "black" if r < 0 else "draw"] += 1
@@ -192,6 +200,8 @@ def gpu_selfplay(
         hpol[ar, write_t] = res.pol.to(torch.int16)
         hprob[ar, write_t] = (res.visits / total).to(torch.float16)
         hstm[ar, write_t] = st.stm
+        if hmove is not None:
+            hmove[ar, write_t] = code
 
         # resignation (checked after recording, like the CPU implementation)
         resign_now = torch.zeros(S, dtype=torch.bool, device=dev)

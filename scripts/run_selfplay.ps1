@@ -14,6 +14,8 @@ param(
   [int]$TemperatureMoves = 18,                # plies sampled at temperature 1.0 (CLI default 25)
   [int]$ArenaGames = 400,                     # arena size (mirrored pairs; one fresh opening per pair)
   [double]$GateThreshold = 0.43,              # ~-50 Elo margin (was 0.5 = must prove strictly better)
+  [switch]$NoGateSignificance,                # promote on score alone (no significance test)
+  [string]$DataDir = "data_improved",         # labeled shards mixed into training (--sup-fraction)
   [int]$CpuMask = 0xF,                        # logical cores the run may use (0xF = 4 of 12); one runs the launcher thread
   [int]$StallSec = 1800,                      # no log activity for this long => hung
   [int]$MaxRestarts = 50,
@@ -21,7 +23,7 @@ param(
 )
 $Extra = @($Extra | ForEach-Object { $_ -split "," } | Where-Object { $_ })  # -File passes comma lists as one string
 Set-Location (Split-Path -Parent $PSScriptRoot)
-$env:CHESSAI_DATA = "data_improved"; $env:CHESSAI_DEVICE = "cuda"; $env:TORCH_BLAS_PREFER_HIPBLASLT = "0"
+$env:CHESSAI_DATA = $DataDir; $env:CHESSAI_DEVICE = "cuda"; $env:TORCH_BLAS_PREFER_HIPBLASLT = "0"
 $env:OMP_NUM_THREADS = "1"; $env:MKL_NUM_THREADS = "1"
 $py = ".\.venv\Scripts\python.exe"; $jsonl = "logs\selfplay.jsonl"; $bestPath = "models\$Best"
 $log = "logs\selfplay_pipeline.out"
@@ -74,6 +76,7 @@ for ($try = 0; $try -lt $MaxRestarts; $try++) {
          "--games-per-iter","$GamesPerIter","--sims","$Sims","--temperature-moves","$TemperatureMoves","--sup-fraction","0.5",
          "--arena-every","3","--arena-games","$ArenaGames","--gate-min-games","$ArenaGames",
          "--gate-threshold","$GateThreshold") + $Extra
+  if ($NoGateSignificance) { $a += "--no-gate-significance" }
   if ($ArenaSims -gt 0) { $a += @("--arena-sims","$ArenaSims") }
   if ($LrDecayIters -gt 0) { $a += @("--lr-decay-from","$LrDecayFrom","--lr-decay-iters","$LrDecayIters") }
   Say "attempt $try : init=$init start_iter=$start"

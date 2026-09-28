@@ -58,7 +58,7 @@ from teacher.stockfish import StockfishTeacher
 from train.evaluate import estimate_elo, play_game
 from train.progress import ProgressLogger
 from train.selfplay import play_selfplay_game
-from train.supervised import policy_loss
+from train.supervised import _value_to_wdl, _wdl_loss, policy_loss
 
 
 # --------------------------------------------------------------------------- #
@@ -147,27 +147,6 @@ def _sp_play_inner(task):
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
-def _value_to_wdl(value: torch.Tensor) -> torch.Tensor:
-    """Convert a scalar target in [-1, 1] (a game outcome, or a teacher's tanh(cp) eval)
-    into a soft (win, draw, loss) target for the WDL value head.
-
-    ``p_win = relu(v)``, ``p_loss = relu(-v)``, ``p_draw = 1 - |v|`` -- a linear split
-    between "draw" and the decisive outcome by eval magnitude. It's exact for self-play
-    game outcomes (v in {-1, 0, 1} maps to a pure one-hot) and a reasonable soft label
-    for continuous teacher evals (small |v| ~ balanced/drawish, |v| near 1 ~ decisive).
-    """
-    p_win = torch.relu(value)
-    p_loss = torch.relu(-value)
-    p_draw = 1 - value.abs()
-    return torch.stack([p_win, p_draw, p_loss], dim=-1)
-
-
-def _wdl_loss(wdl_logits: torch.Tensor, target_value: torch.Tensor) -> torch.Tensor:
-    """Cross-entropy of the WDL head against a soft (win, draw, loss) target."""
-    target = _value_to_wdl(target_value)
-    return -(target * F.log_softmax(wdl_logits, dim=-1)).sum(dim=-1).mean()
-
-
 def _gate_promote(
     wins: int,
     draws: int,

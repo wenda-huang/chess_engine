@@ -28,3 +28,4 @@ stockfish/
 .env.ps1
 lc0/
 data_improved/
+data_distill/
