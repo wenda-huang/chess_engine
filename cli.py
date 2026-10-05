@@ -154,6 +154,7 @@ def cmd_selfplay(args: argparse.Namespace) -> None:
             sims=args.sims, train_steps=args.train_steps, batch_size=args.batch_size, lr=args.lr,
             lr_decay_from=args.lr_decay_from, lr_decay_iters=args.lr_decay_iters,
             lr_min_fraction=args.lr_min_fraction,
+            lr_cut_patience=args.lr_cut_patience, lr_cut_factor=args.lr_cut_factor,
             buffer_capacity=args.buffer_capacity, init_checkpoint=args.init, out_name=args.out,
             best_name=args.best_out, temperature_moves=args.temperature_moves,
             sup_fraction=args.sup_fraction, anchor_size=args.anchor_size,
@@ -533,6 +534,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--lr-decay-iters", type=int, default=0,
                     help="(gpu engine) cosine-decay the LR to lr*--lr-min-fraction over this many iterations (0 = constant)")
     sp.add_argument("--lr-min-fraction", type=float, default=0.1)
+    sp.add_argument(
+        "--lr-cut-patience", type=int, default=30,
+        help="(gpu engine) cut the LR if this many iterations pass with no promotion (0 = off)",
+    )
+    sp.add_argument(
+        "--lr-cut-factor", type=float, default=0.5,
+        help="(gpu engine) multiply the LR by this factor on a plateau cut (stacks; never resets up)",
+    )
     sp.add_argument("--slots", type=int, default=256,
                     help="(gpu engine) games searched concurrently; --games-per-iter above this refills slots as games end")
     sp.add_argument("--anchor-size", type=int, default=1_000_000,

@@ -11,6 +11,8 @@ param(
   [int]$ArenaSims = 0,                        # 0 = same as -Sims
   [int]$LrDecayFrom = 0,                      # iteration where the cosine LR decay begins
   [int]$LrDecayIters = 0,                     # decay length in iterations (0 = constant LR)
+  [int]$LrCutPatience = 30,                   # cut LR after this many iters with no promotion (0 = off)
+  [double]$LrCutFactor = 0.5,                 # multiply LR by this on a plateau cut (stacks, never resets up)
   [int]$TemperatureMoves = 18,                # plies sampled at temperature 1.0 (CLI default 25)
   [int]$ArenaGames = 400,                     # arena size (mirrored pairs; one fresh opening per pair)
   [double]$GateThreshold = 0.43,              # ~-50 Elo margin (was 0.5 = must prove strictly better)
@@ -52,6 +54,8 @@ $tailJob = Start-Job -ScriptBlock {
       "selfplay_done" { "[iter $($evt.iter)] selfplay: $($evt.seconds)s  W=$($evt.white) B=$($evt.black) D=$($evt.draw)  buffer=$($evt.buffer)" }
       "promote"       { "[iter $($evt.iter)] *** PROMOTED to champ v$($evt.champ_version)  score=$($evt.arena_score)  $($evt.wins)W-$($evt.draws)D-$($evt.losses)L ***" }
       "arena_reject"  { "[iter $($evt.iter)] arena: not promoted -- $($evt.gate_reason)  score=$($evt.arena_score)" }
+      "lr_cut"        { "[iter $($evt.iter)] *** LR CUT: x$($evt.lr_scale) after $($evt.stalled_iters) iters with no promotion -> lr=$($evt.new_lr) ***" }
+      "lr_cut_resumed" { "=== resuming with LR already cut x$($evt.lr_scale) (last promotion: iter $($evt.last_promote_iter)) ===" }
       "done"          { "=== SELFPLAY RUN COMPLETE: champ v$($evt.champ_version), checkpoint=$($evt.checkpoint) ===" }
       default         { }
     }
@@ -79,6 +83,7 @@ for ($try = 0; $try -lt $MaxRestarts; $try++) {
   if ($NoGateSignificance) { $a += "--no-gate-significance" }
   if ($ArenaSims -gt 0) { $a += @("--arena-sims","$ArenaSims") }
   if ($LrDecayIters -gt 0) { $a += @("--lr-decay-from","$LrDecayFrom","--lr-decay-iters","$LrDecayIters") }
+  $a += @("--lr-cut-patience","$LrCutPatience","--lr-cut-factor","$LrCutFactor")
   Say "attempt $try : init=$init start_iter=$start"
   $p = Start-Process -FilePath $py -ArgumentList $a -NoNewWindow -PassThru -RedirectStandardOutput logs\selfplay.out -RedirectStandardError logs\selfplay.err
   $p.PriorityClass = "BelowNormal"; $p.ProcessorAffinity = $CpuMask  # set before the worker pool spawns so children inherit

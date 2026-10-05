@@ -6,6 +6,7 @@ played in one batched search over hundreds of concurrent games (see ``engine.gpu
 """
 from __future__ import annotations
 
+import json
 import math
 import os
 import random
@@ -24,6 +25,38 @@ from engine.model import build_model, load_checkpoint, save_checkpoint
 from train.progress import ProgressLogger
 from train.supervised import policy_loss
 from train.train_loop import _gate_promote, _wdl_loss
+
+
+def _replay_lr_cut_state(log_path: str, start_iter: int, patience: int, factor: float) -> tuple[int, float, int]:
+    """Reconstruct (last_promote_iter, lr_scale, next_cut_at) by replaying past arena events.
+
+    Needed because the resilient launcher restarts this process from scratch on every
+    crash/stall; without this, a restart would forget any stall-triggered LR cuts and
+    the plateau count would reset for free.
+    """
+    last_promote_iter = -1
+    scale = 1.0
+    next_cut = patience
+    if start_iter <= 0 or not log_path or not os.path.exists(log_path):
+        return last_promote_iter, scale, next_cut
+    events = []
+    with open(log_path) as f:
+        for line in f:
+            try:
+                ev = json.loads(line)
+            except Exception:
+                continue
+            if ev.get("event") in ("promote", "arena_reject") and ev.get("iter", 10**9) < start_iter:
+                events.append(ev)
+    events.sort(key=lambda e: e["iter"])
+    for ev in events:
+        if ev["event"] == "promote":
+            last_promote_iter = ev["iter"]
+            next_cut = last_promote_iter + patience
+        elif ev["iter"] >= next_cut:
+            scale *= factor
+            next_cut += patience
+    return last_promote_iter, scale, next_cut
 
 
 class GpuAnchor:
@@ -67,6 +100,8 @@ def train_selfplay_gpu(
     lr_decay_from: int = 0,
     lr_decay_iters: int = 0,
     lr_min_fraction: float = 0.1,
+    lr_cut_patience: int = 30,
+    lr_cut_factor: float = 0.5,
     buffer_capacity: int = 300_000,
     init_checkpoint: Optional[str] = "models/supervised.pt",
     out_name: str = "selfplay.pt",
@@ -129,6 +164,7 @@ def train_selfplay_gpu(
         "arena_games": arena_games, "gate_threshold": gate_threshold,
         "gate_min_games": gate_min_games, "temperature_moves": temperature_moves,
         "resign": resign, "search_amp": search_amp,
+        "lr_cut_patience": lr_cut_patience, "lr_cut_factor": lr_cut_factor,
     })
     save_checkpoint(best_path, champion, meta={"iter": start_iter - 1, "note": "init"})
 
@@ -141,9 +177,21 @@ def train_selfplay_gpu(
         floor = lr * lr_min_fraction
         return floor + 0.5 * (lr - floor) * (1 + math.cos(math.pi * frac))
 
+    # Plateau-triggered LR cut: if ``lr_cut_patience`` iterations pass with no promotion,
+    # multiply the LR by ``lr_cut_factor`` (stacks on further stalls; never reset back up).
+    # Reconstructed from the log on resume so a crash/restart doesn't forget past cuts.
+    last_promote_iter, lr_scale, next_lr_cut_at = (-1, 1.0, lr_cut_patience)
+    if lr_cut_patience > 0:
+        last_promote_iter, lr_scale, next_lr_cut_at = _replay_lr_cut_state(
+            progress.path, start_iter, lr_cut_patience, lr_cut_factor
+        )
+        if lr_scale != 1.0:
+            progress.log({"event": "lr_cut_resumed", "lr_scale": round(lr_scale, 6),
+                          "last_promote_iter": last_promote_iter, "next_lr_cut_at": next_lr_cut_at})
+
     for it in range(start_iter, iterations):
         torch.manual_seed(1000 + it)
-        cur_lr = lr_at(it)
+        cur_lr = lr_at(it) * lr_scale
         for group in optimizer.param_groups:
             group["lr"] = cur_lr
         t0 = time.time()
@@ -216,9 +264,17 @@ def train_selfplay_gpu(
                 save_checkpoint(os.path.join(config.models_dir, f"{stem}_it{it}{ext}"), champion,
                                 meta={"iter": it, "arena_score": score})
                 progress.log({"event": "promote", "champ_version": champ_version, **common})
+                last_promote_iter = it
+                next_lr_cut_at = it + lr_cut_patience
             else:
                 candidate.load_state_dict(champion.state_dict())  # reject: revert the candidate
                 progress.log({"event": "arena_reject", **common})
+                if lr_cut_patience > 0 and it >= next_lr_cut_at:
+                    lr_scale *= lr_cut_factor
+                    next_lr_cut_at += lr_cut_patience
+                    progress.log({"event": "lr_cut", "iter": it, "lr_scale": round(lr_scale, 6),
+                                  "stalled_iters": it - last_promote_iter,
+                                  "new_lr": round(lr_at(it) * lr_scale, 8)})
 
         progress.log({"event": "iter_done", "iter": it, "seconds": round(time.time() - t0)})
 
